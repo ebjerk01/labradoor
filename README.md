@@ -42,8 +42,8 @@ Progress is tracked as [issues](../../issues), one per step, grouped into milest
 - [x] 7. Pilot: two modules (one simple, one complex) on the v2 format before the rest follow
 
 **Phase 3: every module moved once**
-- [ ] 8. Infrastructure modules: PBS, NPM, Cloudflare, UniFi, Guacamole, Graylog, Authentik, AD, Domains
-- [ ] 9. Media modules: Jellyfin, Sonarr, Radarr, Prowlarr, Bazarr, qBittorrent, Seerr
+- [x] 8. Infrastructure modules: PBS, NPM, Cloudflare, UniFi, Guacamole, Graylog, Authentik, AD, Domains
+- [x] 9. Media modules: Jellyfin, Sonarr, Radarr, Prowlarr, Bazarr, qBittorrent, Seerr
 - [x] 10. Private modules for the original homelab's own apps (not published)
 - [x] 11. MikroTik switch module: ports, PoE power-cycle, VLANs
 - [ ] 12. Remove the v1 compatibility layer
