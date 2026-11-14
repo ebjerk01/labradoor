@@ -46,7 +46,7 @@ Progress is tracked as [issues](../../issues), one per step, grouped into milest
 - [x] 9. Media modules: Jellyfin, Sonarr, Radarr, Prowlarr, Bazarr, qBittorrent, Seerr
 - [x] 10. Private modules for the original homelab's own apps (not published)
 - [x] 11. MikroTik switch module: ports, PoE power-cycle, VLANs
-- [ ] 12. Remove the v1 compatibility layer
+- [x] 12. Remove the v1 compatibility layer
 
 **Phase 4: install and distribution**
 - [ ] 13. Core with no homelab-specific defaults; sensible empty states
