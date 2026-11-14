@@ -24,7 +24,7 @@ Labradoor is a self-hosted control room for your homelab. You open one site and 
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ebjerk01/labradoor/main/install.sh)"
 ```
 
-The installer will create a small Debian container, and a first-run page will let you create your owner account. After that you install modules from the catalog. Each module asks for a URL plus an API key or login, tests the connection, and starts working, much like integrations in Home Assistant. You can optionally sign in through your own OIDC provider (Authentik, Keycloak, …).
+The installer will create a small Debian container, and a first-run page will let you create your owner account. After that you install modules from the catalog. Labradoor and each module update from the UI when a new release is published, with one-click rollback. Each module asks for a URL plus an API key or login, tests the connection, and starts working, much like integrations in Home Assistant. You can optionally sign in through your own OIDC provider (Authentik, Keycloak, …).
 
 ## Roadmap
 
@@ -52,8 +52,8 @@ Progress is tracked as [issues](../../issues), one per step, grouped into milest
 - [ ] 13. Core with no homelab-specific defaults; sensible empty states
 - [ ] 14. Login: first-run owner setup, local accounts, optional OIDC
 - [ ] 15. Connectors (helper services) managed by Labradoor, each isolated with its own credentials
-- [ ] 16. Signed module catalog: install, update and remove from the UI
-- [ ] 17. Proxmox installer, releases, update and rollback
+- [ ] 16. Signed module catalog: install, update and remove from the UI; every module versioned and updated on its own
+- [ ] 17. Proxmox installer, releases, and one-click update (and rollback) from the UI when a new release is published
 - [ ] 18. The original homelab moves to the public build
 - [ ] 19. Security review of the module system
 - [ ] 20. Clean-install test on a fresh Proxmox, following only the docs
