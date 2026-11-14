@@ -36,7 +36,7 @@ Progress is tracked as [issues](../../issues), one per step, grouped into milest
 
 **Phase 2: the new frame**
 - [x] 3. Module format v2: strict manifest schema, categories, dependencies, config schema with connection test, encrypted secrets per installation
-- [ ] 4. Module SDK: shared helpers, tables and status handling; modules talk only through declared interfaces
+- [x] 4. Module SDK: shared helpers, tables and status handling; modules talk only through declared interfaces
 - [ ] 5. Speed: server-side polling shared by all users, pushed to the browser; modules loaded on demand
 - [ ] 6. Shell and navigation: menu grouped by category, one consistent design, task-aware Ctrl-K, compact mobile bar
 - [ ] 7. Pilot: two modules (one simple, one complex) on the v2 format before the rest follow
