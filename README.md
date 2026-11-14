@@ -32,7 +32,7 @@ Progress is tracked as [issues](../../issues), one per step, grouped into milest
 
 **Phase 1: safe ground**
 - [x] 1. Safe deploys: release directories, atomic switch, rollback, database backups and migrations, lock against concurrent deploys
-- [ ] 2. Operating the gateway itself: self-monitoring alerts, firewall and unit files in the repo, key inventory, backups
+- [x] 2. Operating the gateway itself: self-monitoring alerts, firewall and unit files in the repo, key inventory, backups
 
 **Phase 2: the new frame**
 - [ ] 3. Module format v2: strict manifest schema, categories, dependencies, config schema with connection test, encrypted secrets per installation
