@@ -39,7 +39,7 @@ Progress is tracked as [issues](../../issues), one per step, grouped into milest
 - [x] 4. Module SDK: shared helpers, tables and status handling; modules talk only through declared interfaces
 - [ ] 5. Speed: server-side polling shared by all users, pushed to the browser; modules loaded on demand
 - [ ] 6. Shell and navigation: menu grouped by category, one consistent design, task-aware Ctrl-K, compact mobile bar
-- [ ] 7. Pilot: two modules (one simple, one complex) on the v2 format before the rest follow
+- [x] 7. Pilot: two modules (one simple, one complex) on the v2 format before the rest follow
 
 **Phase 3: every module moved once**
 - [ ] 8. Infrastructure modules: PBS, NPM, Cloudflare, UniFi, Guacamole, Graylog, Authentik, AD, Domains
