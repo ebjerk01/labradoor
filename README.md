@@ -55,7 +55,7 @@ Progress is tracked as [issues](../../issues), one per step, grouped into milest
 - [ ] 16. Signed module catalog: install, update and remove from the UI; every module versioned and updated on its own
 - [ ] 17. Proxmox installer, releases, and one-click update (and rollback) from the UI when a new release is published
 - [ ] 18. The original homelab moves to the public build
-- [ ] 19. Security review of the module system
+- [x] 19. Security review of the module system
 - [ ] 20. Clean-install test on a fresh Proxmox, following only the docs
 
 **Phase 5: public release**
