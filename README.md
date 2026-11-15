@@ -49,7 +49,7 @@ Progress is tracked as [issues](../../issues), one per step, grouped into milest
 - [x] 12. Remove the v1 compatibility layer
 
 **Phase 4: install and distribution**
-- [ ] 13. Core with no homelab-specific defaults; sensible empty states
+- [x] 13. Core with no homelab-specific defaults; sensible empty states
 - [ ] 14. Login: first-run owner setup, local accounts, optional OIDC
 - [ ] 15. Connectors (helper services) managed by Labradoor, each isolated with its own credentials
 - [ ] 16. Signed module catalog: install, update and remove from the UI; every module versioned and updated on its own
