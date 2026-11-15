@@ -51,7 +51,7 @@ Progress is tracked as [issues](../../issues), one per step, grouped into milest
 **Phase 4: install and distribution**
 - [x] 13. Core with no homelab-specific defaults; sensible empty states
 - [x] 14. Login: first-run owner setup, local accounts, optional OIDC
-- [ ] 15. Connectors (helper services) managed by Labradoor, each isolated with its own credentials
+- [x] 15. Connectors (helper services) managed by Labradoor, each isolated with its own credentials
 - [ ] 16. Signed module catalog: install, update and remove from the UI; every module versioned and updated on its own
 - [ ] 17. Proxmox installer, releases, and one-click update (and rollback) from the UI when a new release is published
 - [ ] 18. The original homelab moves to the public build
