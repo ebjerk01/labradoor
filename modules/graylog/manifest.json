@@ -1,0 +1,222 @@
+{
+  "manifest": 2,
+  "id": "graylog",
+  "name": "Graylog",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "monitoring",
+  "icon": "search",
+  "description": "Logs everywhere: every object's last lines and rate, search and live tail, streams, events. Users, roles and inputs: owner only.",
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Graylog URL",
+        "required": true,
+        "placeholder": "http://graylog.example:9000"
+      },
+      {
+        "key": "token",
+        "type": "secret",
+        "label": "Access credential",
+        "required": true,
+        "help": "A Graylog access token (System → Users → your service user → Edit tokens). Paste the token itself."
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true
+      }
+    ],
+    "validate": {
+      "method": "GET",
+      "path": "/api/streams",
+      "expect": [
+        200
+      ]
+    }
+  },
+  "backend": {
+    "url": "{url}",
+    "health": "/api/system/lbstatus",
+    "timeout": 30,
+    "tls_verify": "{verify_tls}",
+    "headers": {
+      "X-Requested-By": "lab"
+    },
+    "auth": {
+      "type": "basic",
+      "secret": "token",
+      "password": "token"
+    }
+  },
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/search/universal/relative"
+    },
+    {
+      "method": "GET",
+      "path": "/api/search/universal/absolute"
+    },
+    {
+      "method": "POST",
+      "path": "/api/search/aggregate",
+      "min": "guest",
+      "audit": false,
+      "label": "log aggregate (read)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/events/search",
+      "min": "guest",
+      "audit": false,
+      "label": "event search (read)"
+    },
+    {
+      "method": "GET",
+      "path": "/api/streams"
+    },
+    {
+      "method": "GET",
+      "path": "/api/streams/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/views"
+    },
+    {
+      "method": "GET",
+      "path": "/api/views/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/views/search/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/events/definitions"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/throughput"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/journal"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/indexer/overview"
+    },
+    {
+      "method": "POST",
+      "path": "/api/streams",
+      "min": "admin",
+      "label": "create log stream"
+    },
+    {
+      "method": "POST",
+      "path": "/api/streams/*/resume",
+      "min": "admin",
+      "label": "start log stream"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users",
+      "owner_only": true,
+      "label": "list graylog users"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users/**",
+      "owner_only": true,
+      "secret": true,
+      "label": "read graylog user/tokens"
+    },
+    {
+      "method": "GET",
+      "path": "/api/roles",
+      "owner_only": true,
+      "label": "list graylog roles"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/inputs",
+      "owner_only": true,
+      "label": "read graylog inputs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/inputstates",
+      "owner_only": true,
+      "label": "read graylog input states"
+    },
+    {
+      "method": "GET",
+      "path": "/api/events/notifications",
+      "owner_only": true,
+      "label": "read graylog notifications"
+    }
+  ],
+  "settings": [
+    {
+      "key": "web_url",
+      "type": "text",
+      "default": "",
+      "label": "Graylog web address",
+      "help": "Where browsers open Graylog (for the \"graylog\" links), e.g. https://graylog.example.com. Empty = no links."
+    },
+    {
+      "key": "host_aliases",
+      "type": "list",
+      "default": [],
+      "label": "log source → object id",
+      "help": "A source (the sender's hostname) that is called something else in lab: pve=pve1 (comma-separated)."
+    },
+    {
+      "key": "strip_domains",
+      "type": "list",
+      "default": [],
+      "label": "domains to strip from source names",
+      "help": "e.g. example.com. .lan, .local, .localdomain and .home.arpa are always stripped."
+    },
+    {
+      "key": "strip_prefixes",
+      "type": "list",
+      "default": [],
+      "label": "prefixes to strip from source names",
+      "help": "e.g. site1- (host site1-web is shown as web)."
+    },
+    {
+      "key": "self_object",
+      "type": "text",
+      "default": "graylog",
+      "label": "Graylog's own object",
+      "help": "The lab object id of the Graylog server itself (it gets the ingest health section)."
+    },
+    {
+      "key": "syslog_target",
+      "type": "text",
+      "default": "",
+      "label": "syslog input address",
+      "help": "host:port machines forward to, shown when an object has no logs (e.g. 10.0.0.5:1514)."
+    },
+    {
+      "key": "security_object",
+      "type": "text",
+      "default": "",
+      "label": "failed-logins object",
+      "help": "The lab object that shows failed-login numbers (monitoring module), linked from the security searches."
+    }
+  ]
+}

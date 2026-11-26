@@ -1,0 +1,973 @@
+#!/usr/bin/env python3
+"""Root helper for installable modules (installed as /usr/local/sbin/lab-module-helper; docs/catalog.md).
+
+Socket-activated like the update helper (lab-module-helper.socket, Accept=yes): one process per request, ONE JSON line
+in on stdin, ONE JSON line out. Only group lab (the gateway) and root (lab-admin) can connect. The gateway never writes
+module code: it asks this helper, which accepts only these commands:
+
+  {"op": "catalog-check", "index": URL}          fetch a module catalog (URL + URL.sig), verify its signature with the
+                                                 trusted publisher keys (/etc/lab/publishers.d/*.pub, root-only) and
+                                                 keep the verified copy → its modules, each version marked installable
+                                                 here or not (min_core, svelte ABI, installed, bundled) and why
+  {"op": "stage", "id": ID, "version": V        download V of ID from a catalog checked before (catalog: its URL when
+   [, "catalog": URL]}                           several list it) into the helper's own state and verify it: sha256 from
+                                                 the signed catalog, the package's own signature (the catalog's
+                                                 publisher), no links or paths outside it, every file against its
+                                                 MANIFEST, package.json + manifest (id, version, min_core, the svelte ABI,
+                                                 connector port) → what the module asks for (the install dialog)
+  {"op": "install", "id": ID, "version": V}      verify the staged V again and put it in /var/lib/lab-modules/ID/V
+                                                 (root-owned, read-only for everyone else); ID must not be installed
+  {"op": "update", "id": ID, "version": V}       the same for a newer V of an installed ID from the SAME publisher; the
+                                                 version before stays on disk for a rollback (a running connector is
+                                                 restarted on the new code)
+  {"op": "rollback", "id": ID}                   back to the version before (verified again)
+  {"op": "remove", "id": ID, "keep_config": B}   remove ID's files (its connector is stopped first). keep_config false
+                                                 also removes its connector's key, unix user and state — unless a
+                                                 bundled module of the same id still uses them (the gateway drops the
+                                                 module's config from its database itself)
+  {"op": "status"}                               installed modules, trusted publishers, checked catalogs, staged packages
+  every request may carry "by": the user who asked (for the log)
+
+Never followed or written: anything the gateway's user (or a connector's user) could create or replace (security review
+2026-11-15, H2). Downloads go to this helper's own directory (root 0700); installed trees are created by root under
+/var/lib/lab-modules (root 0755); the only thing taken from the gateway is the request line itself.
+
+Refused: catalogs and packages not signed by a trusted publisher (a package must be signed by its catalog's publisher;
+an update by the installed version's publisher), sha256 / MANIFEST mismatches, links or paths outside the package, a
+package that replaces a bundled module unless it is newer and signed with the core's release key, min_core newer than
+the core, a UI built for another svelte (major.minor) or importing what the shell does not export, a PRIVILEGED module
+(`delegate: true` or `connector.uses_credentials_of`) from a publisher other than the core's release key unless root
+allowed that publisher for it (/etc/lab/publishers.d/<name>.privileged: `lab-admin publisher allow-privileged NAME`),
+a connector port another module uses, and URLs that are not https:// (plain http:// on the LAN only with LAB_UPDATE_ALLOW_HTTP=1 in
+/etc/lab/update.env — the same test switch as core updates).
+
+Command line (root):
+  lab-module-helper verify-package FILE.tar.gz [PUBKEY]   check a package (signature with PUBKEY or the trusted
+                                                          publishers, MANIFEST, package.json, manifest): the build uses it
+  lab-module-helper publishers                            the trusted publisher keys"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.parse
+
+sys.dont_write_bytecode = True   # root never writes __pycache__ next to code it imports
+HERE = os.path.dirname(os.path.realpath(__file__))
+LIVE = os.environ.get("LAB_LIVE", "/opt/lab")
+GATEWAY = os.environ.get("LAB_GATEWAY_CODE", os.path.join(LIVE, "gateway"))
+ABI_FILE = os.environ.get("LAB_ABI", os.path.join(LIVE, "ui", "dist", "abi.json"))
+BUNDLED = os.environ.get("LAB_BUNDLED_MODULES", os.path.join(LIVE, "modules"))
+STATE = os.environ.get("LAB_MODULE_STATE", "/var/lib/lab-module-helper")
+INSTALLED = os.environ.get("LAB_INSTALLED_MODULES", "/var/lib/lab-modules")
+PUBLISHERS = os.environ.get("LAB_PUBLISHERS", "/etc/lab/publishers.d")
+RELEASE_PUB = os.environ.get("LAB_RELEASE_PUB", "/etc/lab/release.pub")
+UNIT_DIR = os.environ.get("LAB_UNIT_DIR", "/etc/systemd/system")
+KEYS_DIR = os.environ.get("LAB_KEYS", "/etc/lab/keys")
+CONN_STATE = os.environ.get("LAB_CONNECTOR_STATE", "/var/lib/lab-connectors")
+SYSTEMCTL = os.environ.get("LAB_SYSTEMCTL", "/usr/bin/systemctl")
+USERDEL = os.environ.get("LAB_USERDEL", "/usr/sbin/userdel")
+SSH_KEYGEN = os.environ.get("LAB_SSH_KEYGEN", "/usr/bin/ssh-keygen")
+
+CATALOG_MAX = 2 << 20
+SIG_MAX = 16 << 10
+PACKAGE_MAX = 64 << 20
+UNPACKED_MAX = 128 << 20
+MEMBERS_MAX = 5000
+FILE_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+BY_RE = re.compile(r"^[A-Za-z0-9._@ ()-]{1,64}$")
+SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+MANIFEST_LINE = re.compile(r"^([0-9a-f]{64})  ([^\n\\]+)$")
+OPS = {"catalog-check": ({"index"}, set()), "stage": ({"id", "version"}, {"catalog"}),
+       "install": ({"id", "version"}, set()), "update": ({"id", "version"}, set()),
+       "rollback": ({"id"}, set()), "remove": ({"id"}, {"keep_config"}), "status": (set(), set())}
+
+
+def _load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, path)
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+# the update helper next to this file: URL policy, downloads, peer credentials (one implementation of each)
+U = _load("lab_update_helper", os.path.join(HERE, "lab-update-helper"))
+sys.path.insert(0, GATEWAY)
+from lab import modpkg  # noqa: E402
+from lab.registry import ManifestError, validate as validate_manifest  # noqa: E402
+
+NAMESPACE = modpkg.NAMESPACE
+ID_RE = modpkg.ID_RE
+
+
+class Fail(Exception):
+    def __init__(self, msg, **extra):
+        super().__init__(msg)
+        self.extra = extra
+
+
+def _u(fn, *a, **kw):
+    """Call into the update helper; its refusals become ours."""
+    try:
+        return fn(*a, **kw)
+    except U.Fail as e:
+        raise Fail(str(e)) from None
+
+
+# --- publishers + signatures ---------------------------------------------------------------------------------------
+def publishers():
+    pubs, problems = modpkg.read_publishers(PUBLISHERS)
+    return pubs, problems
+
+
+def core_fingerprints():
+    return set(fp for fp in modpkg.file_fingerprints(RELEASE_PUB) if fp)
+
+
+def privileged_allowed(publisher):
+    """May this publisher ship privileged modules (delegate / uses_credentials_of)? The core's release key may; any
+    other publisher only when root allowed it (/etc/lab/publishers.d/<name>.privileged, `lab-admin publisher
+    allow-privileged NAME`). Decided here, as root — never by the gateway."""
+    return publisher["fingerprint"] in core_fingerprints() or publisher["name"] in modpkg.read_privileged(PUBLISHERS)
+
+
+def privilege_problem(perms, publisher, mid):
+    asks = modpkg.privileges(perms)
+    if not asks or privileged_allowed(publisher):
+        return None
+    return (f"{mid} asks for {' and '.join(asks)}: publisher {publisher['name']} is not allowed privileged modules on "
+            f"this installation. If you trust it with that, as root: lab-admin publisher allow-privileged "
+            f"{publisher['name']}")
+
+
+def verify_signed(data_path, sig_path, what):
+    """Who signed `data_path` (a trusted publisher), or Fail. {"name", "fingerprint"}."""
+    pubs, _ = publishers()
+    try:
+        with open(sig_path, "rb") as f:
+            sig = f.read(SIG_MAX + 1)
+        if len(sig) > SIG_MAX:
+            raise Fail(f"{what}: signature too large")
+        fp, ns = modpkg.sshsig_info(sig)
+    except (OSError, modpkg.PackageError) as e:
+        raise Fail(f"{what}: no valid signature ({e})") from None
+    if ns != NAMESPACE:
+        raise Fail(f"{what}: signed for {ns[:40]!r}, not for Labradoor modules ({NAMESPACE})")
+    name = modpkg.publisher_of(fp, pubs)
+    if not name:
+        raise Fail(f"{what}: signed by an unknown publisher ({fp}). If you trust it, add its public key as root: "
+                   "lab-admin publisher add FILE", signer=fp)
+    with tempfile.TemporaryDirectory(prefix="lab-msig-") as tmp:
+        allowed = os.path.join(tmp, "allowed_signers")
+        with open(allowed, "w", encoding="utf-8") as f:
+            for k in pubs[name]:
+                kt, b64 = k.split()[:2]
+                f.write(f'{name} namespaces="{NAMESPACE}" {kt} {b64}\n')
+        with open(data_path, "rb") as data:
+            p = subprocess.run([SSH_KEYGEN, "-Y", "verify", "-f", allowed, "-I", name, "-n", NAMESPACE, "-s", sig_path],
+                               stdin=data, capture_output=True, timeout=60)
+    if p.returncode != 0:
+        raise Fail(f"{what}: the signature does NOT verify (signed by {name} {fp}, but not this file)")
+    return {"name": name, "fingerprint": fp}
+
+
+# --- catalogs -----------------------------------------------------------------------------------------------------
+def _text(v, n, what):
+    if v is None:
+        return ""
+    if not isinstance(v, str) or len(v) > n:
+        raise Fail(f"catalog: {what} must be text (≤ {n})")
+    return v
+
+
+def validate_catalog(doc):
+    if not isinstance(doc, dict) or doc.get("format") != 1 or doc.get("product") != "labradoor-modules" \
+            or not isinstance(doc.get("modules"), list):
+        raise Fail('catalog: expected {"format": 1, "product": "labradoor-modules", "modules": [...]}')
+    out, seen = [], set()
+    for e in doc["modules"][:500]:
+        if not isinstance(e, dict) or not (isinstance(e.get("id"), str) and ID_RE.match(e["id"])):
+            raise Fail("catalog: a module entry needs an id")
+        mid = e["id"]
+        if mid in seen:
+            raise Fail(f"catalog: {mid} listed twice")
+        seen.add(mid)
+        if e.get("kind") not in ("community", "private"):
+            raise Fail(f"catalog: {mid}: kind community|private")
+        vers, vseen = [], set()
+        for v in (e.get("versions") or [])[:50]:
+            if not isinstance(v, dict) or not modpkg.is_version(v.get("version")) or v["version"] in vseen:
+                raise Fail(f"catalog: {mid}: bad or repeated version")
+            vseen.add(v["version"])
+            if not (isinstance(v.get("sha256"), str) and SHA_RE.match(v["sha256"])):
+                raise Fail(f"catalog: {mid} {v['version']}: bad sha256")
+            url = v.get("url")
+            if not isinstance(url, str) or not url or len(url) > 2048:
+                raise Fail(f"catalog: {mid} {v['version']}: bad url")
+            sig = v.get("sig")
+            if sig is not None and (not isinstance(sig, str) or not sig or len(sig) > 2048):
+                raise Fail(f"catalog: {mid} {v['version']}: bad sig url")
+            for k in ("min_core", "svelte"):
+                if v.get(k) is not None and not modpkg.is_version(v[k]):
+                    raise Fail(f"catalog: {mid} {v['version']}: {k} must be a version")
+            perms = v.get("permissions")
+            if perms is not None and (not isinstance(perms, dict) or len(json.dumps(perms)) > 64000):
+                raise Fail(f"catalog: {mid} {v['version']}: permissions summary too large")
+            vers.append({"version": v["version"], "sha256": v["sha256"], "url": url, "sig": sig,
+                         "min_core": v.get("min_core"), "svelte": v.get("svelte"),
+                         "date": _text(v.get("date"), 40, "date"), "notes": _text(v.get("notes"), 4000, "notes"),
+                         "permissions": perms})
+        vers.sort(key=lambda x: _Key(x["version"]), reverse=True)
+        out.append({"id": mid, "name": _text(e.get("name"), 80, "name") or mid, "kind": e["kind"],
+                    "category": _text(e.get("category"), 40, "category"),
+                    "description": _text(e.get("description"), 600, "description"),
+                    "icon": _text(e.get("icon"), 40, "icon"), "versions": vers})
+    return {"name": _text(doc.get("name"), 120, "name"), "generated": _text(doc.get("generated"), 40, "generated"),
+            "modules": out}
+
+
+class _Key:
+    def __init__(self, v):
+        self.v = v
+
+    def __lt__(self, other):
+        return modpkg.compare(self.v, other.v) < 0
+
+
+def _catalog_dir(url):
+    import hashlib
+    return os.path.join(STATE, "catalogs", hashlib.sha256(url.encode()).hexdigest()[:32])
+
+
+def _root_dir(path, mode):
+    """A directory root owns and nobody else can write, created if missing. Never a link."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.mkdir(path, mode)
+        os.chmod(path, mode)
+        return path
+    import stat as _st
+    if not _st.S_ISDIR(st.st_mode) or (os.geteuid() == 0 and st.st_uid != 0) or st.st_mode & 0o022:
+        raise Fail(f"{path} is not a directory only root can write: refusing")
+    return path
+
+
+def _write(path, data, mode=0o644):
+    tmp = path + ".new"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data if isinstance(data, bytes) else data.encode())
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def load_catalog(url):
+    """Fetch + verify → (catalog, publisher); the verified copy is kept for stage."""
+    _u(U.check_url, url)
+    raw = _u(U.fetch, url, CATALOG_MAX)
+    sig = _u(U.fetch, url + ".sig", SIG_MAX)
+    with tempfile.TemporaryDirectory(prefix="lab-mcat-") as tmp:
+        d, s = os.path.join(tmp, "index.json"), os.path.join(tmp, "index.json.sig")
+        with open(d, "wb") as f:
+            f.write(raw)
+        with open(s, "wb") as f:
+            f.write(sig)
+        pub = verify_signed(d, s, "the catalog")
+    try:
+        doc = validate_catalog(json.loads(raw.decode("utf-8")))
+    except (ValueError, UnicodeDecodeError):
+        raise Fail("catalog: not JSON") from None
+    _root_dir(STATE, 0o700)
+    _root_dir(os.path.join(STATE, "catalogs"), 0o700)
+    cd = _root_dir(_catalog_dir(url), 0o700)
+    _write(os.path.join(cd, "index.json"), raw, 0o600)
+    _write(os.path.join(cd, "index.json.sig"), sig, 0o600)
+    _write(os.path.join(cd, "url"), url, 0o600)
+    _write(os.path.join(cd, "checked"), str(round(time.time())), 0o600)
+    return doc, pub
+
+
+def cached_catalogs():
+    """Every catalog checked before, verified again from the kept copy (keys may have been removed since)."""
+    out = []
+    base = os.path.join(STATE, "catalogs")
+    if not os.path.isdir(base):
+        return out
+    for h in sorted(os.listdir(base)):
+        d = os.path.join(base, h)
+        try:
+            with open(os.path.join(d, "url"), encoding="utf-8") as f:
+                url = f.read(4096)
+            pub = verify_signed(os.path.join(d, "index.json"), os.path.join(d, "index.json.sig"), "the catalog")
+            with open(os.path.join(d, "index.json"), "rb") as f:
+                doc = validate_catalog(json.loads(f.read(CATALOG_MAX).decode("utf-8")))
+            checked = int(open(os.path.join(d, "checked")).read(20) or 0)
+        except (OSError, ValueError, UnicodeDecodeError, Fail) as e:
+            out.append({"url": None, "dir": h, "error": str(e)[:300]})
+            continue
+        out.append({"url": url, "dir": h, "catalog": doc, "publisher": pub, "checked": checked})
+    return out
+
+
+# --- the core: version, ABI, bundled + installed modules ----------------------------------------------------------
+def core_version_raw():
+    try:
+        with open(os.path.join(LIVE, "VERSION"), encoding="utf-8") as f:
+            v = f.read(80).strip()
+        return v if modpkg.is_version(v) else None
+    except OSError:
+        return None
+
+
+def bundled_manifest(mid):
+    p = os.path.join(BUNDLED, mid, "manifest.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def state_of(mid):
+    return modpkg.installed_state(mid, INSTALLED)
+
+
+def all_ports(except_id):
+    """Connector ports every other module (bundled or installed) uses."""
+    ports = {}
+    seen = []
+    if os.path.isdir(BUNDLED):
+        for d in sorted(os.listdir(BUNDLED)):
+            if d != except_id and not d.startswith(("_", ".")):
+                seen.append((d, os.path.join(BUNDLED, d, "manifest.json")))
+    for d in modpkg.installed_ids(INSTALLED):
+        st = state_of(d)
+        if d != except_id and st:
+            seen.append((d, os.path.join(INSTALLED, d, st["version"], "manifest.json")))
+    for mid, path in seen:
+        try:
+            with open(path, encoding="utf-8") as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if m.get("connector") is not None:
+            mm = re.match(r"^http://127\.0\.0\.1:(\d+)", str((m.get("backend") or {}).get("url") or ""))
+            if mm:
+                ports[int(mm.group(1))] = mid
+    return ports
+
+
+def annotate(entry, version, publisher=None):
+    """Can this catalog version be installed here (as a new module or an update)? → (ok, why, action)."""
+    mid, v = entry["id"], version["version"]
+    core, shell = core_version_raw(), modpkg.load_abi(ABI_FILE)
+    st = state_of(mid)
+    if version.get("min_core") and not modpkg.core_satisfies(core, version["min_core"]):
+        return False, f"needs core {version['min_core']} (this is {core or 'unknown'})", None
+    if version.get("svelte") and shell and modpkg.parse_version(version["svelte"])[:2] != modpkg.parse_version(shell["svelte"])[:2]:
+        return False, (f"built for svelte {version['svelte']}, this core runs {shell['svelte']} (same major.minor "
+                       "needed: the publisher rebuilds it for this core)"), None
+    if publisher and modpkg.privileges(version.get("permissions")) and not privileged_allowed(publisher):
+        return False, (f"privileged ({', '.join(modpkg.privileges(version.get('permissions')))}): root must allow "
+                       f"publisher {publisher['name']} first (lab-admin publisher allow-privileged {publisher['name']})"), None
+    if st:
+        c = modpkg.compare(v, st["version"])
+        if c == 0:
+            return False, "installed", "installed"
+        if c < 0:
+            return False, f"older than the installed {st['version']}", None
+        return True, "", "update"
+    bm = bundled_manifest(mid)
+    if bm and modpkg.is_version(bm.get("version")):
+        if modpkg.compare(v, bm["version"]) <= 0:
+            return False, f"the core ships {mid} {bm['version']}", None
+        return True, f"replaces the bundled {bm['version']} (only if signed with the core's release key)", "install"
+    return True, "", "install"
+
+
+# --- packages ------------------------------------------------------------------------------------------------------
+def unpack(tar_path, dest, top):
+    """The package tarball → dest/top (plain files and directories only, nothing outside top/)."""
+    total = 0
+    try:
+        with tarfile.open(tar_path, "r:gz") as t:
+            members = []
+            for m in t:
+                members.append(m)
+                if len(members) > MEMBERS_MAX:
+                    raise Fail("package has too many files")
+                name = m.name[2:] if m.name.startswith("./") else m.name
+                parts = name.rstrip("/").split("/")
+                if name.startswith("/") or "\\" in name or ".." in parts or parts[0] != top \
+                        or any(p and not FILE_RE.match(p) for p in parts):
+                    raise Fail(f"package contains a path outside {top}/ or a strange name: {m.name[:120]!r}")
+                if not (m.isfile() or m.isdir()):
+                    raise Fail(f"package contains a link or special file: {m.name[:120]!r}")
+                total += m.size
+                if total > UNPACKED_MAX:
+                    raise Fail("package unpacks too large")
+            try:
+                t.extractall(dest, members=members, filter="data")
+            except TypeError:   # Python < 3.12 (the members were checked above)
+                t.extractall(dest, members=members)
+    except (tarfile.TarError, EOFError, OSError) as e:
+        raise Fail(f"package tarball unreadable: {e.__class__.__name__}") from None
+    tree = os.path.join(dest, top)
+    if not os.path.isdir(tree) or os.path.islink(tree):
+        raise Fail(f"package has no {top}/")
+    for d, dirs, files in os.walk(tree):
+        for n in dirs + files:
+            p = os.path.join(d, n)
+            if os.geteuid() == 0:
+                os.lchown(p, 0, 0)
+            os.chmod(p, 0o755 if os.path.isdir(p) else 0o644)
+    os.chmod(tree, 0o755)
+    return tree
+
+
+def verify_tree(root):
+    """Every file is in the MANIFEST with the right sha256, nothing missing or extra, only the allowed layout.
+    → sorted file list."""
+    try:
+        with open(os.path.join(root, "MANIFEST"), encoding="utf-8") as f:
+            text = f.read(1 << 20)
+    except (OSError, UnicodeDecodeError):
+        raise Fail("package has no readable MANIFEST") from None
+    listed = {}
+    for n, line in enumerate(text.splitlines(), 1):
+        m = MANIFEST_LINE.match(line)
+        if not m:
+            raise Fail(f"MANIFEST line {n} is malformed")
+        path = m.group(2)
+        parts = path.split("/")
+        if path.startswith("/") or any(p in ("", ".", "..") or not FILE_RE.match(p) for p in parts) or path == "MANIFEST":
+            raise Fail(f"MANIFEST: path not allowed: {path[:120]}")
+        if path in listed:
+            raise Fail(f"MANIFEST: {path[:120]} listed twice")
+        if parts[0] not in modpkg.TOP_ALLOWED or (parts[0] == "ui" and path != "ui/ui.js") \
+                or (len(parts) == 1 and parts[0] in ("ui", "connector")):
+            raise Fail(f"not allowed in a module package: {path[:120]} (package.json, manifest.json, ui/ui.js, "
+                       "connector/…, README.md, LICENSE)")
+        listed[path] = m.group(1)
+    actual = set(_u(U._walk_files, root)) - {"MANIFEST"}
+    extra, missing = sorted(actual - set(listed)), sorted(set(listed) - actual)
+    if extra:
+        raise Fail(f"files not in the MANIFEST: {', '.join(extra[:5])}")
+    if missing:
+        raise Fail(f"files missing from the package: {', '.join(missing[:5])}")
+    for path, want in listed.items():
+        if U.sha256_file(os.path.join(root, path)) != want:
+            raise Fail(f"MANIFEST mismatch: {path[:120]}")
+    for need in ("package.json", "manifest.json", "ui/ui.js"):
+        if need not in listed:
+            raise Fail(f"not a module package (no {need})")
+    return sorted(listed)
+
+
+def check_tree(root, mid, version, publisher):
+    """The unpacked, MANIFEST-checked package → (package.json, validated manifest, permissions). Everything a package
+    must meet on THIS installation: ids, versions, min_core, the svelte ABI, its connector, the bundled-module rule."""
+    files = verify_tree(root)
+    try:
+        with open(os.path.join(root, "package.json"), encoding="utf-8") as f:
+            pkg = modpkg.check_package_json(json.load(f), mid, version)
+        with open(os.path.join(root, "manifest.json"), encoding="utf-8") as f:
+            m = validate_manifest(json.load(f), mid)
+    except (OSError, ValueError, UnicodeDecodeError) as e:   # PackageError + ManifestError are ValueErrors
+        raise Fail(f"{mid} {version}: {e}") from None
+    if m["version"] != version or m["kind"] != pkg["kind"]:
+        raise Fail(f"{mid}: manifest.json says {m['version']} ({m['kind']}), the package {version} ({pkg['kind']})")
+    if (m.get("min_core") or None) != (pkg.get("min_core") or None):
+        raise Fail(f"{mid}: min_core differs between manifest.json and package.json")
+    core = core_version_raw()
+    if not modpkg.core_satisfies(core, m.get("min_core")):
+        raise Fail(f"{mid} {version} needs core {m['min_core']} or newer (this is {core or 'unknown'}): update the core first")
+    why = modpkg.abi_problem(pkg["abi"], modpkg.load_abi(ABI_FILE))
+    if why:
+        raise Fail(f"{mid} {version}: {why}")
+    has_conn = any(f.startswith("connector/") for f in files)
+    if bool(m.get("connector")) != has_conn or pkg["connector"] != has_conn:
+        raise Fail(f"{mid}: manifest `connector`, package.json and the connector/ folder must agree")
+    if has_conn:
+        if "connector/connector.py" not in files:
+            raise Fail(f"{mid}: connector/ has no connector.py")
+        port = m["connector"]["port"]
+        if port < 1024 or port == 8100:
+            raise Fail(f"{mid}: connector port {port} is not allowed")
+        other = all_ports(mid).get(port)
+        if other:
+            raise Fail(f"{mid}: connector port {port} is used by {other}")
+    perms = modpkg.permissions(m)
+    why = privilege_problem(perms, publisher, mid)
+    if why:
+        raise Fail(why)
+    bm = bundled_manifest(mid)
+    if bm:
+        if not (publisher["fingerprint"] in core_fingerprints() and modpkg.is_version(bm.get("version"))
+                and modpkg.compare(version, bm["version"]) > 0):
+            raise Fail(f"{mid} ships with the core ({bm.get('version')}): a package may replace it only when it is newer "
+                       "and signed with the core's release key")
+    return pkg, m, perms
+
+
+def stage_dir(mid, version):
+    return os.path.join(STATE, "stage", f"{mid}-{version}")
+
+
+def find_entry(mid, version, catalog=None):
+    hits = []
+    for c in cached_catalogs():
+        if not c.get("url") or (catalog and c["url"] != catalog):
+            continue
+        e = next((x for x in c["catalog"]["modules"] if x["id"] == mid), None)
+        v = next((x for x in (e or {}).get("versions", []) if x["version"] == version), None)
+        if v:
+            hits.append((c, e, v))
+    if not hits:
+        raise Fail(f"{mid} {version} is in no checked catalog{' ' + catalog if catalog else ''} (check the catalog first)")
+    if len({(h[0]["publisher"]["fingerprint"], h[2]["sha256"]) for h in hits}) > 1:
+        raise Fail(f"{mid} {version} is in several catalogs with different contents: name the catalog")
+    return hits[0]
+
+
+def op_catalog_check(index):
+    doc, pub = load_catalog(index)
+    mods = []
+    for e in doc["modules"]:
+        st = state_of(e["id"])
+        vers = []
+        for v in e["versions"]:
+            ok, why, action = annotate(e, v, pub)
+            vers.append({**{k: v[k] for k in ("version", "date", "notes", "min_core", "svelte", "permissions")},
+                         "ok": ok, "why": why, "action": action})
+        best = next((v for v in vers if v["ok"]), None)
+        bm = bundled_manifest(e["id"])
+        mods.append({**{k: e[k] for k in ("id", "name", "kind", "category", "description", "icon")},
+                     "installed": st["version"] if st else None,
+                     "bundled": (bm or {}).get("version") if bm else None,
+                     "available": best["version"] if best else None, "action": best["action"] if best else None,
+                     "versions": vers})
+    return {"catalog": {"url": index, "name": doc["name"], "generated": doc["generated"], "publisher": pub},
+            "modules": mods}
+
+
+def op_stage(mid, version, catalog):
+    c, e, v = find_entry(mid, version, catalog)
+    st = state_of(mid)
+    if st and modpkg.compare(version, st["version"]) <= 0:
+        raise Fail(f"{mid} {st['version']} is installed: {version} is not newer (going back is a rollback)")
+    if st and st.get("publisher", {}).get("fingerprint") != c["publisher"]["fingerprint"]:
+        raise Fail(f"{mid} is installed from publisher {st.get('publisher', {}).get('name')}: an update must come from "
+                   f"the same publisher (this catalog: {c['publisher']['name']})")
+    bm = bundled_manifest(mid)
+    if bm and not (c["publisher"]["fingerprint"] in core_fingerprints() and modpkg.is_version(bm.get("version"))
+                   and modpkg.compare(version, bm["version"]) > 0):
+        raise Fail(f"{mid} ships with the core ({bm.get('version')}): a package may replace it only when it is newer "
+                   "and signed with the core's release key")
+    url = _u(U.check_url, urllib.parse.urljoin(c["url"], v["url"]))
+    sig_url = _u(U.check_url, urllib.parse.urljoin(c["url"], v["sig"])) if v.get("sig") else url + ".sig"
+    _root_dir(STATE, 0o700)
+    _root_dir(os.path.join(STATE, "stage"), 0o700)
+    d = stage_dir(mid, version)
+    shutil.rmtree(d, ignore_errors=True)
+    old = sorted(os.listdir(os.path.join(STATE, "stage")), key=lambda n: os.stat(os.path.join(STATE, "stage", n)).st_mtime)
+    for n in old[:-4]:   # a few staged packages at most (each up to 64 MB + its unpacked tree)
+        shutil.rmtree(os.path.join(STATE, "stage", n), ignore_errors=True)
+    os.mkdir(d, 0o700)
+    tar = os.path.join(d, "package.tar.gz")
+    try:
+        got = _u(U.download, url, tar, PACKAGE_MAX)
+        if got != v["sha256"]:
+            raise Fail(f"sha256 mismatch: the catalog says {v['sha256'][:12]}…, the download is {got[:12]}…")
+        with open(tar + ".sig", "wb") as f:
+            f.write(_u(U.fetch, sig_url, SIG_MAX))
+        pub = verify_signed(tar, tar + ".sig", f"package {mid} {version}")
+        if pub["fingerprint"] != c["publisher"]["fingerprint"]:
+            raise Fail(f"package {mid} {version} is signed by {pub['name']}, its catalog by {c['publisher']['name']}: "
+                       "a catalog may only list its own publisher's packages")
+        tree = unpack(tar, os.path.join(d, "tree"), f"{mid}-{version}")
+        pkg, m, perms = check_tree(tree, mid, version, pub)
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    info = {"id": mid, "version": version, "sha256": got, "publisher": pub, "catalog": c["url"],
+            "name": m["name"], "description": m.get("description") or "", "kind": m["kind"], "category": m["category"],
+            "min_core": m.get("min_core"), "permissions": perms, "staged": round(time.time()),
+            "privileged": {"asks": modpkg.privileges(perms), "allowed_because":
+                           ("core release key" if pub["fingerprint"] in core_fingerprints() else
+                            f"root allowed publisher {pub['name']}") if modpkg.privileges(perms) else None},
+            "installed": st["version"] if st else None, "action": "update" if st else "install",
+            "replaces_bundled": (bundled_manifest(mid) or {}).get("version")}
+    _write(os.path.join(d, "staged.json"), json.dumps(info), 0o600)
+    return {"staged": info}
+
+
+def verify_staged(mid, version):
+    d = stage_dir(mid, version)
+    try:
+        with open(os.path.join(d, "staged.json"), encoding="utf-8") as f:
+            info = json.load(f)
+    except (OSError, ValueError):
+        raise Fail(f"{mid} {version} is not staged (stage it first)") from None
+    tar = os.path.join(d, "package.tar.gz")
+    if not os.path.isfile(tar) or U.sha256_file(tar) != info.get("sha256"):
+        raise Fail(f"staged {mid} {version}: sha256 changed — stage it again")
+    pub = verify_signed(tar, tar + ".sig", f"package {mid} {version}")
+    if pub["fingerprint"] != info["publisher"]["fingerprint"]:
+        raise Fail(f"staged {mid} {version}: signer changed — stage it again")
+    tree = os.path.join(d, "tree", f"{mid}-{version}")
+    pkg, m, perms = check_tree(tree, mid, version, pub)
+    return info, tree, pkg, m
+
+
+def _place(tree, mid, version, record):
+    _root_dir(INSTALLED, 0o755)
+    base = _root_dir(os.path.join(INSTALLED, mid), 0o755)
+    dst, tmp = os.path.join(base, version), os.path.join(base, f".{version}.new")
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.mkdir(tmp, 0o755)
+    for rel in sorted(set(_u(U._walk_files, tree))):
+        src, out = os.path.join(tree, rel), os.path.join(tmp, rel)
+        os.makedirs(os.path.dirname(out), mode=0o755, exist_ok=True)
+        with open(src, "rb") as fi:
+            _write(out, fi.read(), 0o644)
+    for d, dirs, _ in os.walk(tmp):
+        for n in dirs:
+            os.chmod(os.path.join(d, n), 0o755)
+    if os.path.exists(dst):
+        shutil.rmtree(dst)
+    os.rename(tmp, dst)
+    _write(os.path.join(base, f"{version}.json"), json.dumps(record), 0o644)
+
+
+def _set_state(mid, version, previous, publisher, by):
+    _write(os.path.join(INSTALLED, mid, "state.json"),
+           json.dumps({"version": version, "previous": previous, "publisher": publisher,
+                       "updated": round(time.time()), "by": by or ""}), 0o644)
+
+
+def _prune(mid, keep):
+    base = os.path.join(INSTALLED, mid)
+    for n in os.listdir(base):
+        v = n[:-5] if n.endswith(".json") and n != "state.json" else n
+        if n == "state.json" or v in keep:
+            continue
+        p = os.path.join(base, n)
+        if os.path.isdir(p) and not os.path.islink(p):
+            shutil.rmtree(p)
+        elif n.endswith(".json") or n.startswith("."):
+            os.unlink(p)
+
+
+def _systemctl(*args):
+    try:
+        return subprocess.run([SYSTEMCTL, *args], capture_output=True, text=True, timeout=90).returncode
+    except (OSError, subprocess.SubprocessError):
+        return 1
+
+
+def dropin_path(mid):
+    return os.path.join(UNIT_DIR, f"lab-connector@{mid}.service.d", "50-module.conf")
+
+
+def set_dropin(mid, version):
+    """The connector of an installed module runs from its package (lab-connector@.service runs /opt/lab/connectors/ID
+    otherwise). The connector helper writes the same file; it is root's own (/etc/systemd/system)."""
+    want = (f"# lab-module-helper: the connector of the installed module {mid} {version}\n[Service]\n"
+            f"WorkingDirectory={INSTALLED}/{mid}/{version}/connector\n")
+    path = dropin_path(mid)
+    try:
+        with open(path, encoding="utf-8") as f:
+            if f.read() == want:
+                return False
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+    _write(path, want, 0o644)
+    _systemctl("daemon-reload")
+    return True
+
+
+def clear_dropin(mid):
+    path = dropin_path(mid)
+    if os.path.exists(path):
+        os.unlink(path)
+        try:
+            os.rmdir(os.path.dirname(path))
+        except OSError:
+            pass
+        _systemctl("daemon-reload")
+
+
+def _activate(mid, version, m):
+    """After the live version of `mid` changed: its connector runs the new code (if it was running)."""
+    if m.get("connector"):
+        set_dropin(mid, version)
+        _systemctl("try-restart", f"lab-connector@{mid}.service")
+    elif os.path.exists(dropin_path(mid)):   # this version has no connector any more: the old one stops
+        _systemctl("disable", "--now", f"lab-connector@{mid}.service")
+        clear_dropin(mid)
+
+
+def op_install(mid, version, by, update=False):
+    info, tree, pkg, m = verify_staged(mid, version)
+    st = state_of(mid)
+    if update:
+        if not st:
+            raise Fail(f"{mid} is not installed (install it)")
+        if modpkg.compare(version, st["version"]) <= 0:
+            raise Fail(f"{version} is not newer than the installed {st['version']} (going back is a rollback)")
+        if st.get("publisher", {}).get("fingerprint") != info["publisher"]["fingerprint"]:
+            raise Fail(f"{mid} {st['version']} came from {st.get('publisher', {}).get('name')}; {version} is signed by "
+                       f"{info['publisher']['name']}: an update must come from the same publisher")
+    elif st:
+        raise Fail(f"{mid} {st['version']} is installed already (update or remove it)")
+    record = {"id": mid, "version": version, "sha256": info["sha256"], "publisher": info["publisher"],
+              "catalog": info["catalog"], "installed": round(time.time()), "by": by or "", "kind": m["kind"]}
+    _place(tree, mid, version, record)
+    _set_state(mid, version, st["version"] if st else None, info["publisher"], by)
+    _prune(mid, {version} | ({st["version"]} if st else set()))
+    _activate(mid, version, m)
+    shutil.rmtree(stage_dir(mid, version), ignore_errors=True)
+    return {"installed": mid, "version": version, "previous": st["version"] if st else None,
+            "publisher": info["publisher"], "connector": bool(m.get("connector"))}
+
+
+def op_rollback(mid, by):
+    st = state_of(mid)
+    if not st:
+        raise Fail(f"{mid} is not installed")
+    prev = st.get("previous")
+    if not prev or not modpkg.is_version(prev) or not os.path.isdir(os.path.join(INSTALLED, mid, prev)):
+        raise Fail(f"{mid}: no earlier version on disk to go back to")
+    pkg, m, _ = check_tree(os.path.join(INSTALLED, mid, prev), mid, prev, st["publisher"])
+    _set_state(mid, prev, st["version"], st["publisher"], by)
+    _activate(mid, prev, m)
+    return {"rolled_back": mid, "version": prev, "from": st["version"]}
+
+
+def op_remove(mid, keep_config, by):
+    st = state_of(mid)
+    if not st:
+        raise Fail(f"{mid} is not installed (a bundled module can only be switched off)")
+    had_conn = os.path.exists(dropin_path(mid)) or os.path.isdir(os.path.join(INSTALLED, mid, st["version"], "connector"))
+    bundled = bundled_manifest(mid)
+    if had_conn:
+        _systemctl("disable", "--now", f"lab-connector@{mid}.service")
+        clear_dropin(mid)
+    base = os.path.join(INSTALLED, mid)
+    if os.path.isdir(base) and not os.path.islink(base):
+        shutil.rmtree(base)
+    removed = []
+    if not keep_config and not bundled:
+        key = os.path.join(KEYS_DIR, f"{mid}.key")
+        if os.path.lexists(key):
+            os.unlink(key)
+            removed.append("key")
+        cs = os.path.join(CONN_STATE, mid)
+        if os.path.isdir(cs) and not os.path.islink(cs):
+            shutil.rmtree(cs)   # fd-based: links inside are removed, never followed
+            removed.append("connector state")
+        user = f"lab-c-{mid}"
+        try:
+            import pwd
+            pwd.getpwnam(user)
+            if subprocess.run([USERDEL, user], capture_output=True, timeout=60).returncode == 0:
+                removed.append(f"user {user}")
+        except (KeyError, OSError, subprocess.SubprocessError):
+            pass
+    return {"removed": mid, "version": st["version"], "kept_config": bool(keep_config),
+            "bundled_remains": (bundled or {}).get("version"), "also_removed": removed}
+
+
+def op_status():
+    pubs, problems = publishers()
+    core = core_fingerprints()
+    privileged = modpkg.read_privileged(PUBLISHERS)
+    inst = []
+    for mid in modpkg.installed_ids(INSTALLED):
+        st = state_of(mid)
+        rec = {}
+        try:
+            with open(os.path.join(INSTALLED, mid, f"{st['version']}.json"), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            pass
+        inst.append({"id": mid, "version": st["version"], "previous": st.get("previous"),
+                     "publisher": st.get("publisher"), "updated": st.get("updated"), "by": st.get("by"),
+                     "catalog": rec.get("catalog"), "kind": rec.get("kind"),
+                     "connector": os.path.isdir(os.path.join(INSTALLED, mid, st["version"], "connector"))})
+    cats = []
+    for c in cached_catalogs():
+        cats.append({"url": c.get("url"), "error": c.get("error"), "checked": c.get("checked"),
+                     "name": (c.get("catalog") or {}).get("name"), "publisher": c.get("publisher")})
+    staged = []
+    sd = os.path.join(STATE, "stage")
+    for n in sorted(os.listdir(sd)) if os.path.isdir(sd) else []:
+        try:
+            with open(os.path.join(sd, n, "staged.json"), encoding="utf-8") as f:
+                s = json.load(f)
+            staged.append({"id": s["id"], "version": s["version"], "staged": s["staged"]})
+        except (OSError, ValueError, KeyError):
+            pass
+    shell = modpkg.load_abi(ABI_FILE)
+    return {"installed": inst, "catalogs": cats, "staged": staged, "core": core_version_raw(),
+            "svelte": shell["svelte"] if shell else None, "allow_http": U.allow_http(),
+            "publishers": [{"name": n, "fingerprints": [modpkg.key_fingerprint(k) for k in ks],
+                            "core": any(modpkg.key_fingerprint(k) in core for k in ks),
+                            "privileged": n in privileged or any(modpkg.key_fingerprint(k) in core for k in ks)}
+                           for n, ks in sorted(pubs.items())],
+            "publisher_problems": problems, "publishers_dir": PUBLISHERS}
+
+
+# --- requests ------------------------------------------------------------------------------------------------------
+def check(req):
+    """The request → (op, args). Everything not exactly as documented is refused."""
+    if not isinstance(req, dict):
+        raise Fail("request is a JSON object")
+    op = req.get("op")
+    if op not in OPS:
+        raise Fail(f"op is one of {', '.join(OPS)}")
+    need, may = OPS[op]
+    keys = set(req) - {"op", "by"}
+    if keys - need - may or need - keys:
+        raise Fail(f"{op} takes {', '.join(sorted(need | may)) or 'nothing'}")
+    by = req.get("by")
+    if by is not None and not (isinstance(by, str) and BY_RE.match(by)):
+        raise Fail("by: a user name")
+    a = {"by": by}
+    if "index" in need:
+        a["index"] = _u(U.check_url, req["index"])
+    if "id" in need:
+        if not (isinstance(req["id"], str) and ID_RE.match(req["id"])):
+            raise Fail("id: a module id")
+        a["id"] = req["id"]
+    if "version" in need:
+        if not modpkg.is_version(req["version"]):
+            raise Fail("version: a module version (semver)")
+        a["version"] = req["version"]
+    if "catalog" in may:
+        cat = req.get("catalog")
+        a["catalog"] = _u(U.check_url, cat) if cat is not None else None
+    if "keep_config" in may:
+        kc = req.get("keep_config", False)
+        if not isinstance(kc, bool):
+            raise Fail("keep_config: true or false")
+        a["keep_config"] = kc
+    return op, a
+
+
+def handle(req):
+    op, a = check(req)
+    if op == "catalog-check":
+        return op_catalog_check(a["index"])
+    if op == "stage":
+        return op_stage(a["id"], a["version"], a["catalog"])
+    if op == "install":
+        return op_install(a["id"], a["version"], a["by"])
+    if op == "update":
+        return op_install(a["id"], a["version"], a["by"], update=True)
+    if op == "rollback":
+        return op_rollback(a["id"], a["by"])
+    if op == "remove":
+        return op_remove(a["id"], a["keep_config"], a["by"])
+    return op_status()
+
+
+def log_event(op, req, result, detail=""):
+    try:
+        _root_dir(STATE, 0o700)
+        with open(os.path.join(STATE, "audit.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": round(time.time()), "op": op, "by": req.get("by") or "",
+                                "id": req.get("id") or "", "version": req.get("version") or "",
+                                "result": result, "detail": str(detail)[:500]}) + "\n")
+    except (OSError, Fail):
+        pass
+
+
+def serve_one():
+    line, req, op = b"", {}, "?"
+    try:
+        line = sys.stdin.buffer.readline(8192)
+        req = json.loads(line.decode() or "null")
+        if isinstance(req, dict):
+            op = str(req.get("op"))[:20]
+        out = {"ok": True, **handle(req)}
+    except Fail as e:
+        out = {"ok": False, "error": str(e), **e.extra}
+    except (ValueError, UnicodeDecodeError, TypeError):
+        out = {"ok": False, "error": "one JSON line expected"}
+    except Exception as e:  # noqa: BLE001
+        out = {"ok": False, "error": f"helper error: {e.__class__.__name__}"}
+    if op not in ("status", "?"):
+        log_event(op, req if isinstance(req, dict) else {}, "ok" if out.get("ok") else "refused", out.get("error") or "")
+    try:
+        sys.stdout.write(json.dumps(out) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        pass
+    print(f"lab-module-helper: {line[:300]!r} -> ok={out.get('ok')} {out.get('error') or ''}", file=sys.stderr)
+
+
+def verify_package_file(path, pubkey=None):
+    """The build's own check (deploy/make-module.sh): signature, layout, MANIFEST, package.json, manifest."""
+    name = os.path.basename(path)
+    m = re.match(r"^([a-z][a-z0-9-]{1,30})-(\d[0-9A-Za-z.-]*)\.tar\.gz$", name)
+    if not m or not modpkg.is_version(m.group(2)):
+        raise Fail(f"{name}: expected <id>-<version>.tar.gz")
+    mid, version = m.group(1), m.group(2)
+    global PUBLISHERS
+    with tempfile.TemporaryDirectory(prefix="lab-mpkg-") as tmp:
+        if pubkey:
+            os.mkdir(os.path.join(tmp, "pubs"), 0o755)
+            shutil.copy(pubkey, os.path.join(tmp, "pubs", "build.pub"))
+            PUBLISHERS = os.path.join(tmp, "pubs")
+            os.environ["LAB_PUBLISHERS_ANY_OWNER"] = "1"
+        pub = verify_signed(path, path + ".sig", name)
+        tree = unpack(path, os.path.join(tmp, "x"), f"{mid}-{version}")
+        files = verify_tree(tree)
+        with open(os.path.join(tree, "package.json"), encoding="utf-8") as f:
+            modpkg.check_package_json(json.load(f), mid, version)
+        with open(os.path.join(tree, "manifest.json"), encoding="utf-8") as f:
+            man = validate_manifest(json.load(f), mid)
+        if man["version"] != version:
+            raise Fail(f"manifest.json says {man['version']}")
+    return {"id": mid, "version": version, "files": len(files), "publisher": pub}
+
+
+def main(argv):
+    try:
+        if argv[:1] == ["verify-package"] and len(argv) in (2, 3):
+            print(json.dumps(verify_package_file(argv[1], argv[2] if len(argv) == 3 else None)))
+            return 0
+        if argv == ["publishers"]:
+            pubs, problems = publishers()
+            priv, core = modpkg.read_privileged(PUBLISHERS), core_fingerprints()
+            for n, ks in sorted(pubs.items()):
+                for k in ks:
+                    fp = modpkg.key_fingerprint(k)
+                    print(f"{n}  {fp}{'  privileged' if n in priv or fp in core else ''}")
+            for p in problems:
+                print(f"PROBLEM: {p}", file=sys.stderr)
+            return 0
+    except (Fail, ManifestError, modpkg.PackageError, OSError, ValueError) as e:
+        print(f"REFUSED: {e}", file=sys.stderr)
+        return 1
+    if argv:
+        print(__doc__, file=sys.stderr)
+        return 2
+    serve_one()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

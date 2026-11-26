@@ -1,0 +1,915 @@
+#!/usr/bin/env python3
+"""Root helper for Labradoor core updates (installed as /usr/local/sbin/lab-update-helper).
+
+Socket-activated like lab-connector-helper (lab-update-helper.socket, Accept=yes): one process per request, ONE JSON line
+in on stdin, ONE JSON line out. Only group lab (the gateway) and root (lab-admin) can connect. The gateway never needs
+root: it asks this helper, which accepts only these commands:
+
+  {"op": "check", "index": URL}                    fetch the release index + URL.sig, verify the signature with
+                                                   /etc/lab/release.pub → releases, the newest one this install may take
+  {"op": "stage", "index": URL, "version": V}      download V into /var/lib/lab-update/stage/V and verify it: sha256 from
+                                                   the signed index, the tarball's own signature, every file against the
+                                                   MANIFEST (no file missing, none extra), VERSION = V
+  {"op": "apply", "version": V}                    verify the staged V again and install it exactly like deploy.sh does
+                                                   (its deploy/install.sh under /run/lab-deploy.lock: DB backup,
+                                                   migrations, atomic switch). Runs as the transient unit lab-update-job
+                                                   and answers at once; poll "status". A release that fails to install or
+                                                   whose gateway does not come up is rolled back (with its DB backup).
+  {"op": "rollback", "release": R, "with_db": B}   back to release R in /opt/lab-releases (default: the one before the
+                                                   live one) with lab-rollback; goes forward again if the gateway does
+                                                   not come up (an older release can't open a newer database: use with_db)
+                                                   with_db: true only from root (SO_PEERCRED uid 0) — the gateway can't
+                                                   ask root to put database files back (security review 2026-11-15, H2);
+                                                   the owner runs `lab-admin rollback --with-db` on the host
+  {"op": "status"}                                 installed version + commit, releases on disk, staged versions, the
+                                                   last job, the signing key fingerprint
+  every request may carry "by": the user who asked (for the log)
+
+Refused: anything not signed by a key in /etc/lab/release.pub, a sha256 or MANIFEST mismatch, a version that is not
+newer than the installed one (going back is "rollback"), a version whose min_upgrade_from is newer than the installed
+one, and any URL that is not https:// (redirects included). A plain http:// URL on a private address (LAN) is allowed
+only when LAB_UPDATE_ALLOW_HTTP=1 is set in /etc/lab/update.env — for testing a release server on the LAN.
+
+Command line (root; the job unit, the installer and the release build use these):
+  lab-update-helper --job apply VERSION JOBID | --job rollback RELEASE WITH_DB(0|1) JOBID
+  lab-update-helper verify-tree DIR VERSION     check an unpacked release against its MANIFEST
+  lab-update-helper write-manifest DIR          write DIR/MANIFEST (sha256 of every file; the release build)
+  lab-update-helper verify-sig FILE SIG [PUBKEY]
+"""
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+STATE = os.environ.get("LAB_UPDATE_STATE", "/var/lib/lab-update")
+PUBKEY = os.environ.get("LAB_RELEASE_PUB", "/etc/lab/release.pub")
+LIVE = os.environ.get("LAB_LIVE", "/opt/lab")
+REL_ROOT = os.environ.get("LAB_RELEASES", "/opt/lab-releases")
+LAB_ENV = os.environ.get("LAB_ENV_FILE", "/etc/lab/lab.env")
+ROLLBACK = os.environ.get("LAB_ROLLBACK", "/usr/local/sbin/lab-rollback")
+SELF = os.environ.get("LAB_UPDATE_SELF", "/usr/local/sbin/lab-update-helper")
+SYSTEMCTL = os.environ.get("LAB_SYSTEMCTL", "/usr/bin/systemctl")
+SYSTEMD_RUN = os.environ.get("LAB_SYSTEMD_RUN", "/usr/bin/systemd-run")
+SSH_KEYGEN = os.environ.get("LAB_SSH_KEYGEN", "/usr/bin/ssh-keygen")
+LOCK = os.environ.get("LAB_DEPLOY_LOCK", "/run/lab-deploy.lock")
+JOB_UNIT = "lab-update-job"
+NAMESPACE = "labradoor-release"   # ssh-keygen -Y sign -n labradoor-release
+IDENTITY = "labradoor-release"    # principal in the allowed-signers file made from release.pub
+PRODUCT = "labradoor"
+
+INDEX_MAX = 1 << 20
+SIG_MAX = 16 << 10
+TARBALL_MAX = 256 << 20
+UNPACKED_MAX = 1 << 30
+MEMBERS_MAX = 50000
+NOTES_MAX = 20000
+
+SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$")
+RELEASE_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9A-Za-z._-]{1,40}$")   # /opt/lab-releases/<time>-<commit>
+BY_RE = re.compile(r"^[A-Za-z0-9._@ ()-]{1,64}$")
+SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+MANIFEST_LINE = re.compile(r"^([0-9a-f]{64})  ([^\n\\]+)$")
+KEY_RE = re.compile(r"^(ssh-ed25519|ecdsa-sha2-nistp(?:256|384|521)|ssh-rsa|sk-ssh-ed25519@openssh\.com) [A-Za-z0-9+/]+=*(?: .*)?$")
+OPS = {"check": ({"index"}, set()), "stage": ({"index", "version"}, set()), "apply": ({"version"}, set()),
+       "rollback": (set(), {"release", "with_db"}), "status": (set(), set())}
+REQUIRED_FILES = ("VERSION", "deploy/install.sh", "gateway/lab/server.py", "ui/dist/index.html")
+
+
+class Fail(Exception):
+    pass
+
+
+# --- versions ------------------------------------------------------------------------------------------------------
+def parse_version(v):
+    """'1.2.3-rc.1+build' → (1, 2, 3, ('rc', 1)) ; pre-release None when there is none. ValueError when not semver."""
+    m = SEMVER_RE.match(v or "") if isinstance(v, str) and len(v) <= 64 else None
+    if not m:
+        raise ValueError(f"not a version (semver): {str(v)[:64]!r}")
+    pre = None
+    if m.group(4) is not None:
+        pre = tuple(int(p) if p.isdigit() else p for p in m.group(4).split("."))
+    return int(m.group(1)), int(m.group(2)), int(m.group(3)), pre
+
+
+def compare(a, b):
+    """Semver precedence: -1, 0 or 1 (build metadata is ignored; 1.0.0-rc.1 < 1.0.0)."""
+    pa, pb = parse_version(a), parse_version(b)
+    if pa[:3] != pb[:3]:
+        return -1 if pa[:3] < pb[:3] else 1
+    xa, xb = pa[3], pb[3]
+    if xa == xb:
+        return 0
+    if xa is None:
+        return 1
+    if xb is None:
+        return -1
+    for ia, ib in zip(xa, xb):
+        if ia == ib:
+            continue
+        if isinstance(ia, int) and isinstance(ib, int):
+            return -1 if ia < ib else 1
+        if isinstance(ia, int):   # numeric identifiers sort before alphanumeric ones
+            return -1
+        if isinstance(ib, int):
+            return 1
+        return -1 if ia < ib else 1
+    return -1 if len(xa) < len(xb) else (1 if len(xa) > len(xb) else 0)
+
+
+def is_version(v):
+    try:
+        parse_version(v)
+        return True
+    except ValueError:
+        return False
+
+
+def may_upgrade(current, entry):
+    """(ok, why) for installing index `entry` over the installed `current` version."""
+    if not current or not is_version(current):
+        return False, "the installed version is unknown (not a release): update it with deploy.sh"
+    v = entry["version"]
+    c = compare(v, current)
+    if c < 0:
+        return False, f"{v} is older than the installed {current}: going back is a rollback"
+    if c == 0:
+        return False, f"{v} is already installed"
+    low = entry.get("min_upgrade_from")
+    if low and compare(current, low) < 0:
+        return False, f"{v} needs {low} or newer installed first (installed: {current})"
+    return True, ""
+
+
+# --- URLs + downloads ----------------------------------------------------------------------------------------------
+def allow_http():
+    return os.environ.get("LAB_UPDATE_ALLOW_HTTP", "").strip() == "1"
+
+
+def _private_host(host):
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        raise Fail(f"can't resolve {host}") from None
+    addrs = {i[4][0] for i in infos}
+    return bool(addrs) and all(
+        (lambda a: a.is_private or a.is_loopback or a.is_link_local)(ipaddress.ip_address(x.split("%")[0])) for x in addrs)
+
+
+def check_url(url, http_ok=None):
+    """https:// only; http:// only to a private address with LAB_UPDATE_ALLOW_HTTP=1. No user:password@, no fragment."""
+    http_ok = allow_http() if http_ok is None else http_ok
+    if not isinstance(url, str) or not url or len(url) > 2048 or any(c in url for c in "\r\n\t "):
+        raise Fail("URL: expected one https:// URL")
+    p = urllib.parse.urlsplit(url)
+    if not p.hostname or p.username is not None or p.password is not None or p.fragment:
+        raise Fail(f"URL not allowed: {url[:200]}")
+    if p.scheme == "https":
+        return url
+    if p.scheme == "http" and http_ok:
+        if not _private_host(p.hostname):
+            raise Fail(f"http:// is only allowed to a LAN address: {p.hostname}")
+        return url
+    if p.scheme == "http":
+        raise Fail("only https:// release URLs are allowed (http:// on the LAN needs LAB_UPDATE_ALLOW_HTTP=1 in "
+                   "/etc/lab/update.env, for testing)")
+    raise Fail(f"URL scheme not allowed: {p.scheme or '?'}")
+
+
+class _Redirects(urllib.request.HTTPRedirectHandler):
+    max_redirections = 5
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_url(urllib.parse.urljoin(req.full_url, newurl))   # never from https to http, never off the policy
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open(url, timeout=30):
+    check_url(url)
+    opener = urllib.request.build_opener(_Redirects())
+    req = urllib.request.Request(url, headers={"User-Agent": f"{PRODUCT}-updater", "Accept": "*/*"})
+    try:
+        return opener.open(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        raise Fail(f"{url[:200]}: HTTP {e.code}") from None
+    except (urllib.error.URLError, OSError) as e:
+        raise Fail(f"{url[:200]}: {str(getattr(e, 'reason', e))[:160]}") from None
+
+
+def fetch(url, limit):
+    with _open(url) as r:
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise Fail(f"{url[:200]}: larger than {limit} bytes")
+    return data
+
+
+def download(url, path, limit):
+    """Stream `url` to `path`; returns its sha256."""
+    h, n = hashlib.sha256(), 0
+    with _open(url, timeout=60) as r, open(path, "wb") as f:
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            n += len(chunk)
+            if n > limit:
+                raise Fail(f"{url[:200]}: larger than {limit} bytes")
+            h.update(chunk)
+            f.write(chunk)
+    return h.hexdigest()
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# --- signatures (OpenSSH, no extra dependency) ---------------------------------------------------------------------
+def public_keys(path=None):
+    path = path or PUBKEY
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
+    except OSError:
+        raise Fail(f"no release signing key at {path}: updates are off") from None
+    keys = [ln for ln in lines if KEY_RE.match(ln)]
+    if not keys or len(keys) != len(lines):
+        raise Fail(f"{path}: expected OpenSSH public key line(s)")
+    return keys
+
+
+def verify_sig(data_path, sig_path, pubkey=None):
+    """True when `sig_path` is a valid `ssh-keygen -Y sign -n labradoor-release` signature of `data_path` by a key in
+    the release key file. Never raises for a bad signature (False)."""
+    keys = public_keys(pubkey)
+    with tempfile.TemporaryDirectory(prefix="lab-sig-") as tmp:
+        allowed = os.path.join(tmp, "allowed_signers")
+        with open(allowed, "w", encoding="utf-8") as f:
+            for k in keys:
+                kt, b64 = k.split()[:2]
+                f.write(f'{IDENTITY} namespaces="{NAMESPACE}" {kt} {b64}\n')
+        with open(data_path, "rb") as data:
+            p = subprocess.run([SSH_KEYGEN, "-Y", "verify", "-f", allowed, "-I", IDENTITY, "-n", NAMESPACE,
+                                "-s", sig_path], stdin=data, capture_output=True, timeout=60)
+    return p.returncode == 0
+
+
+def verify_bytes(data, sig, pubkey=None):
+    with tempfile.TemporaryDirectory(prefix="lab-sig-") as tmp:
+        d, s = os.path.join(tmp, "data"), os.path.join(tmp, "data.sig")
+        with open(d, "wb") as f:
+            f.write(data)
+        with open(s, "wb") as f:
+            f.write(sig)
+        return verify_sig(d, s, pubkey)
+
+
+def fingerprint(pubkey=None):
+    try:
+        keys = public_keys(pubkey)
+    except Fail:
+        return None
+    with tempfile.NamedTemporaryFile("w", suffix=".pub") as f:
+        f.write(keys[0] + "\n")
+        f.flush()
+        p = subprocess.run([SSH_KEYGEN, "-l", "-f", f.name], capture_output=True, text=True, timeout=30)
+    return p.stdout.strip() or None
+
+
+# --- the release index ---------------------------------------------------------------------------------------------
+def validate_index(doc):
+    """The parsed index JSON → its release entries, newest first. Anything unexpected → Fail."""
+    if not isinstance(doc, dict) or doc.get("format") != 1 or not isinstance(doc.get("releases"), list):
+        raise Fail("index: expected {format: 1, releases: [...]}")
+    if doc.get("product", PRODUCT) != PRODUCT:
+        raise Fail("index: not a Labradoor release index")
+    out, seen = [], set()
+    for e in doc["releases"][:500]:
+        if not isinstance(e, dict):
+            raise Fail("index: a release entry is not an object")
+        v = e.get("version")
+        if not is_version(v):
+            raise Fail(f"index: bad version {str(v)[:40]!r}")
+        if v in seen:
+            raise Fail(f"index: {v} listed twice")
+        seen.add(v)
+        sha = e.get("sha256")
+        if not (isinstance(sha, str) and SHA_RE.match(sha)):
+            raise Fail(f"index: {v}: bad sha256")
+        url = e.get("url")
+        if not isinstance(url, str) or not url or len(url) > 2048:
+            raise Fail(f"index: {v}: bad url")
+        sig = e.get("sig")
+        if sig is not None and (not isinstance(sig, str) or not sig or len(sig) > 2048):
+            raise Fail(f"index: {v}: bad sig url")
+        low = e.get("min_upgrade_from") or None
+        if low is not None and not is_version(low):
+            raise Fail(f"index: {v}: bad min_upgrade_from")
+        notes, date = e.get("notes") or "", e.get("date") or ""
+        if not isinstance(notes, str) or not isinstance(date, str):
+            raise Fail(f"index: {v}: notes/date must be text")
+        out.append({"version": v, "sha256": sha, "url": url, "sig": sig, "min_upgrade_from": low,
+                    "notes": notes[:NOTES_MAX], "date": date[:40]})
+    out.sort(key=lambda e: _SortKey(e["version"]), reverse=True)
+    return out
+
+
+class _SortKey:
+    def __init__(self, v):
+        self.v = v
+
+    def __lt__(self, other):
+        return compare(self.v, other.v) < 0
+
+
+def load_index(index_url):
+    """Fetch + verify the signed index → (entries, raw bytes)."""
+    check_url(index_url)
+    raw = fetch(index_url, INDEX_MAX)
+    sig = fetch(index_url + ".sig", SIG_MAX)
+    if not verify_bytes(raw, sig):
+        raise Fail("the release index signature does not verify with the release key (/etc/lab/release.pub)")
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise Fail("index: not JSON") from None
+    return validate_index(doc), raw
+
+
+def resolve(index_url, ref):
+    return check_url(urllib.parse.urljoin(index_url, ref))
+
+
+# --- MANIFEST + unpacking ------------------------------------------------------------------------------------------
+def _walk_files(root):
+    out = []
+    for d, dirs, files in os.walk(root):
+        for name in dirs + files:
+            p = os.path.join(d, name)
+            if os.path.islink(p):
+                raise Fail(f"symlink in release: {os.path.relpath(p, root)}")
+        for name in files:
+            p = os.path.join(d, name)
+            if not os.path.isfile(p):
+                raise Fail(f"not a regular file: {os.path.relpath(p, root)}")
+            out.append(os.path.relpath(p, root).replace(os.sep, "/"))
+    return sorted(out)
+
+
+def write_manifest(root):
+    files = [f for f in _walk_files(root) if f != "MANIFEST"]
+    for f in files:
+        if "\n" in f or "\\" in f or f.startswith("/"):
+            raise Fail(f"file name not allowed in a release: {f!r}")
+    lines = [f"{sha256_file(os.path.join(root, f))}  {f}\n" for f in files]
+    with open(os.path.join(root, "MANIFEST"), "w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+    return len(lines)
+
+
+def verify_tree(root, version):
+    """Every file of the unpacked release is in its MANIFEST with the right sha256, nothing is missing or extra, and
+    VERSION says `version`. Returns the number of files."""
+    try:
+        with open(os.path.join(root, "MANIFEST"), encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        raise Fail("release has no readable MANIFEST") from None
+    listed = {}
+    for n, line in enumerate(text.splitlines(), 1):
+        m = MANIFEST_LINE.match(line)
+        if not m:
+            raise Fail(f"MANIFEST line {n} is malformed")
+        path = m.group(2)
+        parts = path.split("/")
+        if path.startswith("/") or ".." in parts or "." in parts or "" in parts or path == "MANIFEST":
+            raise Fail(f"MANIFEST: path not allowed: {path[:120]}")
+        if path in listed:
+            raise Fail(f"MANIFEST: {path[:120]} listed twice")
+        listed[path] = m.group(1)
+    actual = set(_walk_files(root)) - {"MANIFEST"}
+    extra, missing = sorted(actual - set(listed)), sorted(set(listed) - actual)
+    if extra:
+        raise Fail(f"files not in the MANIFEST: {', '.join(extra[:5])}")
+    if missing:
+        raise Fail(f"files missing from the release: {', '.join(missing[:5])}")
+    for path, want in listed.items():
+        if sha256_file(os.path.join(root, path)) != want:
+            raise Fail(f"MANIFEST mismatch: {path[:120]}")
+    for need in REQUIRED_FILES:
+        if need not in listed:
+            raise Fail(f"not a Labradoor release (no {need})")
+    with open(os.path.join(root, "VERSION"), encoding="utf-8") as f:
+        have = f.read().strip()
+    if have != version:
+        raise Fail(f"the release says it is {have[:40]!r}, not {version}")
+    return len(listed)
+
+
+def unpack(tar_path, dest, version):
+    """Unpack the release tarball (top directory labradoor-<version>/, plain files and directories only) → tree path."""
+    top = f"{PRODUCT}-{version}"
+    total = 0
+    try:
+        with tarfile.open(tar_path, "r:gz") as t:
+            members = []
+            for m in t:
+                members.append(m)
+                if len(members) > MEMBERS_MAX:
+                    raise Fail("release has too many files")
+                name = m.name[2:] if m.name.startswith("./") else m.name
+                parts = name.rstrip("/").split("/")
+                if name.startswith("/") or "\\" in name or ".." in parts or parts[0] != top:
+                    raise Fail(f"release contains a path outside {top}/: {m.name[:120]}")
+                if not (m.isfile() or m.isdir()):
+                    raise Fail(f"release contains a link or special file: {m.name[:120]}")
+                total += m.size
+                if total > UNPACKED_MAX:
+                    raise Fail("release unpacks too large")
+            try:
+                t.extractall(dest, members=members, filter="data")
+            except TypeError:  # Python < 3.12: no filter (the members were checked above)
+                t.extractall(dest, members=members)
+    except (tarfile.TarError, EOFError, OSError) as e:
+        raise Fail(f"release tarball unreadable: {e.__class__.__name__}") from None
+    tree = os.path.join(dest, top)
+    if not os.path.isdir(tree):
+        raise Fail(f"release tarball has no {top}/")
+    for d, dirs, files in os.walk(tree):
+        for n in dirs + files:
+            p = os.path.join(d, n)
+            if os.geteuid() == 0:
+                os.chown(p, 0, 0)
+            os.chmod(p, os.stat(p).st_mode & 0o755)
+    return tree
+
+
+# --- installed state -----------------------------------------------------------------------------------------------
+def _read(path, limit=200):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read(limit).strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def installed():
+    """(version or None, commit or '', live release name)."""
+    v = _read(os.path.join(LIVE, "VERSION"))
+    commit = _read(os.path.join(LIVE, "COMMIT"))
+    if not commit and re.match(r"^[0-9a-f]{40}$", v):   # releases before step 17: VERSION was the commit
+        commit, v = v, ""
+    live = os.path.basename(os.path.realpath(LIVE)) if os.path.exists(LIVE) else ""
+    return (v if is_version(v) else None), commit, live
+
+
+def releases():
+    if not os.path.isdir(REL_ROOT):
+        return []
+    live = os.path.basename(os.path.realpath(LIVE)) if os.path.exists(LIVE) else ""
+    out = []
+    for name in sorted(os.listdir(REL_ROOT)):
+        p = os.path.join(REL_ROOT, name)
+        if not os.path.isdir(p):
+            continue
+        v = _read(os.path.join(p, "VERSION"), 80)
+        c = _read(os.path.join(p, "COMMIT"), 80)
+        if not c and re.match(r"^[0-9a-f]{40}$", v):
+            c, v = v, ""
+        out.append({"name": name, "version": v if is_version(v) else "", "commit": c[:12], "live": name == live})
+    return out
+
+
+def stage_dir(version):
+    return os.path.join(STATE, "stage", version)
+
+
+def staged():
+    d = os.path.join(STATE, "stage")
+    if not os.path.isdir(d):
+        return []
+    return sorted((v for v in os.listdir(d) if is_version(v) and os.path.isfile(os.path.join(d, v, "entry.json"))),
+                  key=_SortKey, reverse=True)
+
+
+def job_file():
+    return os.path.join(STATE, "job.json")
+
+
+def read_job():
+    try:
+        with open(job_file(), encoding="utf-8") as f:
+            job = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if job.get("state") in ("queued", "running") and not _unit_active():
+        job["state"] = "interrupted"
+        job["message"] = job.get("message") or "the update job stopped without a result (journalctl -u lab-update-job)"
+    return job
+
+
+def write_job(job):
+    os.makedirs(STATE, mode=0o700, exist_ok=True)
+    tmp = job_file() + ".new"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(job, f)
+    os.replace(tmp, job_file())
+
+
+def _unit_active():
+    try:
+        p = subprocess.run([SYSTEMCTL, "is-active", JOB_UNIT], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.stdout.strip() in ("active", "activating")
+
+
+def log_event(op, by, result, detail=""):
+    """The helper's own audit trail (the gateway also audits in its database)."""
+    try:
+        os.makedirs(STATE, mode=0o700, exist_ok=True)
+        with open(os.path.join(STATE, "audit.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": round(time.time()), "op": op, "by": by or "", "result": result,
+                                "detail": str(detail)[:500]}) + "\n")
+    except OSError:
+        pass
+
+
+# --- commands ------------------------------------------------------------------------------------------------------
+WITH_DB_ROOT_ONLY = ("restoring the database is only possible as root on the host: lab-admin rollback --with-db "
+                     "(a plain rollback works from here)")
+
+
+def peer_uid(fd=0):
+    """The uid of the process at the other end of the socket systemd handed us as stdin; None when it is no socket."""
+    dup = os.dup(fd)
+    try:
+        s = socket.socket(fileno=dup)
+    except OSError:
+        os.close(dup)
+        return None
+    try:
+        return struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[1]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def check(req, root=False):
+    """The request → (op, args). Everything not exactly as documented is refused. root: the caller is uid 0."""
+    if not isinstance(req, dict):
+        raise Fail("request is a JSON object")
+    op = req.get("op")
+    if op not in OPS:
+        raise Fail(f"op is one of {', '.join(OPS)}")
+    need, may = OPS[op]
+    keys = set(req) - {"op", "by"}
+    if keys - need - may or need - keys:
+        raise Fail(f"{op} takes {', '.join(sorted(need | may)) or 'nothing'}")
+    by = req.get("by")
+    if by is not None and not (isinstance(by, str) and BY_RE.match(by)):
+        raise Fail("by: a user name")
+    args = {"by": by}
+    if "index" in need:
+        args["index"] = check_url(req["index"])
+    if "version" in need:
+        if not is_version(req["version"]):
+            raise Fail("version: a release version (semver)")
+        args["version"] = req["version"]
+    if op == "rollback":
+        rel = req.get("release")
+        if rel is not None and not (isinstance(rel, str) and RELEASE_RE.match(rel)):
+            raise Fail("release: a release name from status (e.g. 20261115-013000-abc1234)")
+        wdb = req.get("with_db", False)
+        if not isinstance(wdb, bool):
+            raise Fail("with_db: true or false")
+        if wdb and not root:
+            raise Fail(WITH_DB_ROOT_ONLY)
+        args.update(release=rel, with_db=wdb)
+    return op, args
+
+
+def op_check(index):
+    entries, _ = load_index(index)
+    cur, commit, _ = installed()
+    out = []
+    for e in entries[:30]:
+        ok, why = may_upgrade(cur, e)
+        out.append({"version": e["version"], "date": e["date"], "notes": e["notes"],
+                    "min_upgrade_from": e["min_upgrade_from"], "ok": ok, "why": why})
+    best = next((e["version"] for e in out if e["ok"]), None)
+    return {"current": cur, "commit": commit[:12], "latest": entries[0]["version"] if entries else None,
+            "update": best, "releases": out}
+
+
+def op_stage(index, version):
+    entries, _ = load_index(index)
+    e = next((x for x in entries if x["version"] == version), None)
+    if not e:
+        raise Fail(f"{version} is not in the release index")
+    cur = installed()[0]
+    ok, why = may_upgrade(cur, e)
+    if not ok:
+        raise Fail(why)
+    url = resolve(index, e["url"])
+    sig_url = resolve(index, e["sig"]) if e["sig"] else url + ".sig"
+    d = stage_dir(version)
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d, mode=0o700)
+    tar = os.path.join(d, "release.tar.gz")
+    try:
+        got = download(url, tar, TARBALL_MAX)
+        if got != e["sha256"]:
+            raise Fail(f"sha256 mismatch: the index says {e['sha256'][:12]}…, the download is {got[:12]}…")
+        with open(tar + ".sig", "wb") as f:
+            f.write(fetch(sig_url, SIG_MAX))
+        if not verify_sig(tar, tar + ".sig"):
+            raise Fail("the release signature does not verify with the release key (/etc/lab/release.pub)")
+        tree = unpack(tar, os.path.join(d, "tree"), version)
+        n = verify_tree(tree, version)
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    with open(os.path.join(d, "entry.json"), "w", encoding="utf-8") as f:
+        json.dump({**e, "index": index, "staged": round(time.time())}, f)
+    for other in staged():   # only the newest download is kept
+        if other != version:
+            shutil.rmtree(stage_dir(other), ignore_errors=True)
+    return {"staged": version, "files": n, "sha256": e["sha256"]}
+
+
+def verify_staged(version):
+    """Everything stage checked, again, from the files on disk (nothing may have changed since)."""
+    d = stage_dir(version)
+    try:
+        with open(os.path.join(d, "entry.json"), encoding="utf-8") as f:
+            e = json.load(f)
+    except (OSError, ValueError):
+        raise Fail(f"{version} is not staged (stage it first)") from None
+    tar = os.path.join(d, "release.tar.gz")
+    if not os.path.isfile(tar) or sha256_file(tar) != e.get("sha256"):
+        raise Fail(f"staged {version}: sha256 changed — stage it again")
+    if not verify_sig(tar, tar + ".sig"):
+        raise Fail(f"staged {version}: signature does not verify — stage it again")
+    tree = os.path.join(d, "tree", f"{PRODUCT}-{version}")
+    verify_tree(tree, version)
+    return e, tree
+
+
+def _start_job(job, argv):
+    cur = read_job()
+    if cur and cur.get("state") in ("queued", "running"):
+        raise Fail(f"an update job is already running ({cur.get('op')} {cur.get('target', '')})")
+    write_job(job)
+    p = subprocess.run([SYSTEMD_RUN, f"--unit={JOB_UNIT}", "--collect", "--quiet", "-p", "RuntimeMaxSec=3600",
+                        "--description=Labradoor update job", "--", SELF, "--job", *argv],
+                       capture_output=True, text=True, timeout=60)
+    if p.returncode:
+        job.update(state="failed", message=f"could not start the job: {(p.stderr or p.stdout).strip()[:200]}",
+                   finished=round(time.time()))
+        write_job(job)
+        raise Fail(job["message"])
+    return {"job": job["id"], "state": "started"}
+
+
+def _job_id():
+    return time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid() % 10000:04d}"
+
+
+def op_apply(version, by):
+    e, _ = verify_staged(version)
+    cur = installed()[0]
+    ok, why = may_upgrade(cur, e)
+    if not ok:
+        raise Fail(why)
+    jid = _job_id()
+    job = {"id": jid, "op": "apply", "target": version, "from": cur, "by": by or "", "state": "queued",
+           "started": round(time.time()), "message": f"installing {version}"}
+    return _start_job(job, ["apply", version, jid])
+
+
+def op_rollback(release, with_db, by):
+    rels = releases()
+    names = [r["name"] for r in rels]
+    live = next((r["name"] for r in rels if r["live"]), None)
+    if release is None:
+        if live not in names or names.index(live) == 0:
+            raise Fail("there is no release before the live one")
+        release = names[names.index(live) - 1]
+    if release not in names:
+        raise Fail(f"no such release: {release}")
+    if release == live:
+        raise Fail(f"{release} is already live")
+    jid = _job_id()
+    job = {"id": jid, "op": "rollback", "target": release, "from": live, "with_db": with_db, "by": by or "",
+           "state": "queued", "started": round(time.time()), "message": f"rolling back to {release}"}
+    return _start_job(job, ["rollback", release, "1" if with_db else "0", jid])
+
+
+def op_status():
+    cur, commit, live = installed()
+    raw = _read(os.path.join(LIVE, "VERSION"), 80)
+    return {"version": cur or "", "raw_version": raw if cur else "", "commit": commit[:40], "live": live,
+            "releases": releases(), "staged": staged(), "job": read_job(), "allow_http": allow_http(),
+            "key": fingerprint(), "key_file": PUBKEY}
+
+
+def handle(req, root=False):
+    op, a = check(req, root)
+    if op == "check":
+        return op_check(a["index"])
+    if op == "stage":
+        return op_stage(a["index"], a["version"])
+    if op == "apply":
+        return op_apply(a["version"], a["by"])
+    if op == "rollback":
+        return op_rollback(a["release"], a["with_db"], a["by"])
+    return op_status()
+
+
+# --- the job (transient unit lab-update-job) -----------------------------------------------------------------------
+def _port():
+    port = "8100"
+    try:
+        with open(LAB_ENV, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("LAB_PORT="):
+                    port = line.split("=", 1)[1].strip().strip('"') or port
+    except OSError:
+        pass
+    return port
+
+
+def healthy(wait=40):
+    url = f"http://127.0.0.1:{_port()}/healthz"
+    until = time.monotonic() + wait
+    while time.monotonic() < until:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as r:
+                if r.status == 200:
+                    return True
+        except (OSError, urllib.error.URLError):
+            pass
+        time.sleep(1)
+    return False
+
+
+def _tail(path, n=25):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()[-8000:].splitlines()[-n:]
+    except OSError:
+        return []
+
+
+def _run_logged(cmd, log, timeout=1800):
+    with open(log, "a", encoding="utf-8") as out:
+        out.write(f"$ {' '.join(cmd)}\n")
+        out.flush()
+        try:
+            return subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, timeout=timeout,
+                                  env={"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                                       "LANG": "C.UTF-8", "HOME": "/root"}).returncode
+        except subprocess.TimeoutExpired:
+            out.write("TIMEOUT\n")
+            return 124
+
+
+def run_job(argv):
+    kind = argv[0]
+    jid = argv[-1]
+    job = read_job() or {}
+    if job.get("id") != jid:
+        print("lab-update-helper: job file does not match this job", file=sys.stderr)
+        return 1
+    os.makedirs(os.path.join(STATE, "logs"), mode=0o700, exist_ok=True)
+    log = os.path.join(STATE, "logs", f"{jid}.log")
+    job.update(state="running", log=log)
+    write_job(job)
+    before = os.path.realpath(LIVE)
+    try:
+        if kind == "apply":
+            ok, msg = _job_apply(argv[1], log, before)
+        else:
+            ok, msg = _job_rollback(argv[1], argv[2] == "1", log, before)
+    except Exception as e:  # noqa: BLE001
+        ok, msg = False, f"job error: {e.__class__.__name__}: {e}"[:300]
+    job.update(state="ok" if ok else "failed", message=msg, finished=round(time.time()), tail=_tail(log),
+               live=os.path.basename(os.path.realpath(LIVE)))
+    write_job(job)
+    log_event(f"{kind}-result", job.get("by"), job["state"], msg)
+    for old in sorted(os.listdir(os.path.join(STATE, "logs")))[:-20]:   # keep 20 job logs
+        try:
+            os.remove(os.path.join(STATE, "logs", old))
+        except OSError:
+            pass
+    return 0 if ok else 1
+
+
+def _job_apply(version, log, before):
+    try:
+        _, tree = verify_staged(version)
+    except Fail as e:
+        return False, f"not installed: {e}"
+    rc = _run_logged(["/usr/bin/flock", "-w", "900", LOCK, "/bin/sh", os.path.join(tree, "deploy", "install.sh")], log)
+    after = os.path.realpath(LIVE)
+    if after != before and healthy():   # install.sh's own last checks may race the gateway's start: health decides
+        shutil.rmtree(stage_dir(version), ignore_errors=True)
+        return True, f"{version} is live ({os.path.basename(after)}){f' — install.sh exit {rc}, see the log' if rc else ''}"
+    if after == before:
+        return False, f"install of {version} failed (exit {rc}) before switching: nothing changed"
+    # the new release is live but broken: back to the one before, with the database as it was before the install
+    rrc = _run_logged([ROLLBACK, os.path.basename(before), "--with-db"], log, timeout=900)
+    back = healthy()
+    how = "with its database" if rrc == 0 else f"(lab-rollback exit {rrc}: see the log — the database may not be restored)"
+    return False, (f"{version} did not come up (install exit {rc}); rolled back to {os.path.basename(before)} {how}"
+                   f"{'' if back else ' — BUT the gateway is still down: check journalctl -u lab'}")
+
+
+def _job_rollback(target, with_db, log, before):
+    rc = _run_logged([ROLLBACK, target] + (["--with-db"] if with_db else []), log, timeout=900)
+    after = os.path.realpath(LIVE)
+    if after != before and healthy():   # lab-rollback's own check runs 1 s after the restart: health decides
+        return True, f"rolled back to {target}{' (database restored)' if with_db else ''}"
+    if after == before:
+        return False, f"rollback to {target} failed (exit {rc}): nothing changed"
+    _run_logged([ROLLBACK, os.path.basename(before)], log, timeout=900)
+    back = healthy()
+    hint = "" if with_db else (" — the older release probably can't open the newer database: roll back with the "
+                               "database, as root on the host: lab-admin rollback --with-db")
+    return False, (f"the gateway did not come up on {target}; went forward to {os.path.basename(before)} again{hint}"
+                   f"{'' if back else ' — BUT the gateway is still down: check journalctl -u lab'}")
+
+
+# --- entry points --------------------------------------------------------------------------------------------------
+def serve_one():
+    line = b""
+    op, by = "?", None
+    try:
+        line = sys.stdin.buffer.readline(8192)
+        req = json.loads(line.decode() or "null")
+        if isinstance(req, dict):
+            op, by = str(req.get("op"))[:20], req.get("by") if isinstance(req.get("by"), str) else None
+        out = {"ok": True, **handle(req, root=peer_uid() == 0)}
+    except Fail as e:
+        out = {"ok": False, "error": str(e)}
+    except (ValueError, UnicodeDecodeError, TypeError):
+        out = {"ok": False, "error": "one JSON line expected"}
+    except Exception as e:  # noqa: BLE001
+        out = {"ok": False, "error": f"helper error: {e.__class__.__name__}"}
+    if op not in ("status", "?"):
+        log_event(op, by, "ok" if out.get("ok") else "refused", out.get("error") or "")
+    try:
+        sys.stdout.write(json.dumps(out) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        pass
+    summary = {k: out[k] for k in ("ok", "error", "staged", "job", "update") if k in out}
+    print(f"lab-update-helper: {line[:300]!r} -> {summary}", file=sys.stderr)
+
+
+def main(argv):
+    if argv[:1] == ["--job"] and len(argv) in (4, 5):
+        return run_job(argv[1:])
+    try:
+        if argv[:1] == ["verify-tree"] and len(argv) == 3:
+            print(f"ok: {verify_tree(argv[1], argv[2])} files match the MANIFEST")
+            return 0
+        if argv[:1] == ["write-manifest"] and len(argv) == 2:
+            print(f"MANIFEST: {write_manifest(argv[1])} files")
+            return 0
+        if argv[:1] == ["verify-sig"] and len(argv) in (3, 4):
+            good = verify_sig(argv[1], argv[2], argv[3] if len(argv) == 4 else None)
+            print("good signature" if good else "BAD signature")
+            return 0 if good else 1
+    except Fail as e:
+        print(f"REFUSED: {e}", file=sys.stderr)
+        return 1
+    if argv:
+        print(__doc__, file=sys.stderr)
+        return 2
+    serve_one()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

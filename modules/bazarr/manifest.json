@@ -1,0 +1,123 @@
+{
+  "manifest": 2,
+  "id": "bazarr",
+  "name": "Bazarr",
+  "version": "2.0.0",
+  "kind": "community",
+  "category": "media",
+  "icon": "log",
+  "description": "Subtitles on media-host: wanted episodes/movies, provider status, scheduled tasks, health. Running a task / resetting providers: admin.",
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Server URL",
+        "required": true,
+        "placeholder": "http://host:6767"
+      },
+      {
+        "key": "api_key",
+        "type": "secret",
+        "label": "API key",
+        "required": true,
+        "help": "Bazarr → Settings → General → Security → API key"
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true
+      }
+    ],
+    "validate": {
+      "method": "GET",
+      "path": "/api/system/status",
+      "expect": [
+        200
+      ]
+    }
+  },
+  "backend": {
+    "url": "{url}",
+    "health": "/api/system/ping",
+    "timeout": 30,
+    "tls_verify": "{verify_tls}",
+    "auth": {
+      "type": "header",
+      "name": "X-API-KEY",
+      "secret": "api_key"
+    }
+  },
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/system/status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/health"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/tasks"
+    },
+    {
+      "method": "GET",
+      "path": "/api/badges"
+    },
+    {
+      "method": "GET",
+      "path": "/api/providers"
+    },
+    {
+      "method": "GET",
+      "path": "/api/episodes/wanted",
+      "query_keys": [
+        "start",
+        "length"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/movies/wanted",
+      "query_keys": [
+        "start",
+        "length"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/system/tasks",
+      "min": "admin",
+      "label": "bazarr: run task",
+      "query_keys": [
+        "taskid"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/providers",
+      "min": "admin",
+      "label": "bazarr: reset throttled providers",
+      "query_keys": [
+        "action"
+      ]
+    }
+  ],
+  "settings": [
+    {
+      "key": "parent",
+      "type": "text",
+      "label": "machine object this runs on",
+      "help": "the lab object id of the host (its facets and this service group under it); empty = none"
+    }
+  ]
+}

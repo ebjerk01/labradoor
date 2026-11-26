@@ -1,0 +1,117 @@
+{
+  "_doc": "Example network/external topology (replace with your own; /etc/lab/topology.json <- deploy/topology.json on deploy).",
+  "zones": [
+    {
+      "id": "cloud",
+      "label": "~/cloud",
+      "tone": "var(--sig)"
+    },
+    {
+      "id": "remote",
+      "label": "~/remote",
+      "tone": "var(--dim)"
+    },
+    {
+      "id": "home",
+      "label": "~/home",
+      "tone": "var(--faint)",
+      "home": true
+    }
+  ],
+  "nodes": [
+    {
+      "id": "offsite",
+      "label": "offsite backup",
+      "icon": "cloud",
+      "round": true,
+      "kind": "offsite",
+      "zone": "cloud"
+    },
+    {
+      "id": "internet",
+      "label": "internet",
+      "bus": true
+    },
+    {
+      "id": "gateway",
+      "label": "gateway",
+      "icon": "router"
+    },
+    {
+      "id": "switch",
+      "label": "switch",
+      "icon": "switch"
+    },
+    {
+      "id": "node-a",
+      "label": "node-a"
+    },
+    {
+      "id": "node-b",
+      "label": "node-b"
+    },
+    {
+      "id": "storage",
+      "label": "storage",
+      "place": "left"
+    },
+    {
+      "id": "ap",
+      "label": "access point",
+      "place": "right"
+    },
+    {
+      "id": "remote-site",
+      "label": "remote site",
+      "zone": "remote",
+      "meta": "vpn"
+    }
+  ],
+  "links": [
+    {
+      "from": "offsite",
+      "to": "internet",
+      "kind": "dashed",
+      "label": "backup"
+    },
+    {
+      "from": "internet",
+      "to": "gateway",
+      "kind": "flow"
+    },
+    {
+      "from": "gateway",
+      "to": "switch",
+      "kind": "flow",
+      "label": "10g"
+    },
+    {
+      "from": "switch",
+      "to": "node-a",
+      "kind": "flow"
+    },
+    {
+      "from": "switch",
+      "to": "node-b",
+      "kind": "flow"
+    },
+    {
+      "from": "switch",
+      "to": "storage",
+      "kind": "dashed",
+      "label": "nas"
+    },
+    {
+      "from": "gateway",
+      "to": "ap",
+      "kind": "dashed"
+    },
+    {
+      "from": "remote-site",
+      "to": "gateway",
+      "kind": "sig",
+      "label": "wireguard"
+    }
+  ],
+  "ownerOnly": {}
+}

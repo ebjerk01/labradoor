@@ -1,0 +1,10 @@
+[Unit]
+Description=Labradoor gateway firewall (/etc/nftables.d-lab.nft: who may reach port 8100)
+Before=lab.service
+After=network-pre.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d-lab.nft
+[Install]
+WantedBy=multi-user.target

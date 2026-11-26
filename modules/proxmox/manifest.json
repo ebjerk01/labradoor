@@ -1,0 +1,325 @@
+{
+  "manifest": 2,
+  "id": "proxmox",
+  "name": "Proxmox VE",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "infrastructure",
+  "icon": "node",
+  "description": "Proxmox VE cluster: guests (power, snapshots, backup now, migrate, resize, cores/memory), nodes, storage, tasks, HA.",
+  "requires": [
+    {
+      "id": "drift",
+      "optional": true
+    }
+  ],
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Proxmox URL",
+        "required": true,
+        "placeholder": "https://pve.example:8006",
+        "help": "Any node of the cluster."
+      },
+      {
+        "key": "api_token",
+        "type": "secret",
+        "label": "API token",
+        "required": true,
+        "help": "USER@REALM!TOKENID=SECRET. A dedicated user + privilege-separated token with a role holding only what the routes use (VM.Audit, VM.PowerMgmt, VM.Snapshot, VM.Backup, VM.Migrate, VM.Config.CPU/Memory/Disk/Options, Datastore.Audit/AllocateSpace, Sys.Audit)."
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true,
+        "help": "Off for Proxmox's own self-signed certificate."
+      }
+    ],
+    "validate": {
+      "method": "GET",
+      "path": "/version",
+      "expect": [
+        200
+      ]
+    }
+  },
+  "backend": {
+    "url": "{url}/api2/json",
+    "health": "/version",
+    "timeout": 30,
+    "tls_verify": "{verify_tls}",
+    "decodes_slashes": true,
+    "auth": {
+      "type": "header",
+      "name": "Authorization",
+      "prefix": "PVEAPIToken=",
+      "secret": "api_token"
+    }
+  },
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/nodes/*/storage/*/content"
+    },
+    {
+      "method": "GET",
+      "path": "/version"
+    },
+    {
+      "method": "GET",
+      "path": "/cluster/resources"
+    },
+    {
+      "method": "GET",
+      "path": "/cluster/status"
+    },
+    {
+      "method": "GET",
+      "path": "/cluster/tasks"
+    },
+    {
+      "method": "GET",
+      "path": "/cluster/backup"
+    },
+    {
+      "method": "GET",
+      "path": "/cluster/ha/resources"
+    },
+    {
+      "method": "GET",
+      "path": "/cluster/ha/status/current"
+    },
+    {
+      "method": "GET",
+      "path": "/cluster/replication"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/status"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/storage"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/tasks"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/tasks/*/status"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/tasks/*/log"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/qemu/*/config"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/lxc/*/config"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/qemu/*/snapshot"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/lxc/*/snapshot"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/qemu/*/migrate"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/*/lxc/*/interfaces"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/qemu/*/status/start",
+      "min": "admin",
+      "label": "start VM"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/qemu/*/status/shutdown",
+      "min": "admin",
+      "label": "shut down VM"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/qemu/*/status/reboot",
+      "min": "admin",
+      "label": "reboot VM"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/qemu/*/status/stop",
+      "min": "admin",
+      "label": "stop VM (hard)"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/lxc/*/status/start",
+      "min": "admin",
+      "label": "start CT"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/lxc/*/status/shutdown",
+      "min": "admin",
+      "label": "shut down CT"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/lxc/*/status/reboot",
+      "min": "admin",
+      "label": "reboot CT"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/lxc/*/status/stop",
+      "min": "admin",
+      "label": "stop CT (hard)"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/qemu/*/snapshot",
+      "min": "admin",
+      "label": "create VM snapshot"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/lxc/*/snapshot",
+      "min": "admin",
+      "label": "create CT snapshot"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/qemu/*/snapshot/*/rollback",
+      "min": "admin",
+      "label": "roll back VM to snapshot"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/lxc/*/snapshot/*/rollback",
+      "min": "admin",
+      "label": "roll back CT to snapshot"
+    },
+    {
+      "method": "DELETE",
+      "path": "/nodes/*/qemu/*/snapshot/*",
+      "min": "admin",
+      "label": "delete VM snapshot"
+    },
+    {
+      "method": "DELETE",
+      "path": "/nodes/*/lxc/*/snapshot/*",
+      "min": "admin",
+      "label": "delete CT snapshot"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/vzdump",
+      "min": "admin",
+      "label": "back up guest now",
+      "body_keys": [
+        "vmid",
+        "storage",
+        "mode",
+        "notes-template"
+      ],
+      "body_allow": {
+        "storage": [
+          "{backup_storage}"
+        ],
+        "mode": [
+          "snapshot"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/qemu/*/migrate",
+      "min": "admin",
+      "label": "migrate VM"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/*/lxc/*/migrate",
+      "min": "admin",
+      "label": "migrate CT"
+    },
+    {
+      "method": "PUT",
+      "path": "/nodes/*/qemu/*/resize",
+      "min": "admin",
+      "label": "grow VM disk"
+    },
+    {
+      "method": "PUT",
+      "path": "/nodes/*/lxc/*/resize",
+      "min": "admin",
+      "label": "grow CT disk"
+    },
+    {
+      "method": "PUT",
+      "path": "/nodes/*/qemu/*/config",
+      "min": "admin",
+      "label": "change VM cores/memory/onboot",
+      "body_keys": [
+        "cores",
+        "memory",
+        "onboot",
+        "digest"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/nodes/*/lxc/*/config",
+      "min": "admin",
+      "label": "change CT cores/memory/onboot",
+      "body_keys": [
+        "cores",
+        "memory",
+        "onboot",
+        "digest"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/nodes/*/tasks/*",
+      "min": "admin",
+      "label": "stop task started from lab"
+    }
+  ],
+  "settings": [
+    {
+      "key": "backup_storage",
+      "type": "text",
+      "default": "",
+      "label": "backup storage for 'back up now'",
+      "help": "The storage ID (Datacenter → Storage) that 'back up now' writes to; the gateway refuses any other. Empty: no 'back up now' action."
+    },
+    {
+      "key": "node_names",
+      "type": "list",
+      "default": [],
+      "label": "node name → object id",
+      "help": "When a node has another name in your monitoring than in Proxmox, e.g. pve=pve1 (comma-separated)."
+    }
+  ]
+}

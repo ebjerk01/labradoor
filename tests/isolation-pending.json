@@ -1,0 +1,3 @@
+{
+  "_": "manifest-2 modules whose UI half is not on the SDK yet: their isolation problems are listed, not fatal. Remove an entry when its UI is ported (the gate fails while a listed module is already clean, so this list only shrinks). docs/sdk.md#the-deploy-gate"
+}

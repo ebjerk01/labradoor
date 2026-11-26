@@ -1,0 +1,14 @@
+[Unit]
+Description=Labradoor update helper (one request: check, stage, apply, rollback or status)
+
+[Service]
+ExecStart=/usr/local/sbin/lab-update-helper
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+# LAB_UPDATE_ALLOW_HTTP=1 here allows a plain http:// release server on the LAN (testing only)
+EnvironmentFile=-/etc/lab/update.env
+RuntimeMaxSec=900
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes

@@ -1,0 +1,181 @@
+{
+  "manifest": 2,
+  "id": "qbit",
+  "name": "qBittorrent",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "media",
+  "icon": "download",
+  "description": "qBittorrent through the lab connector qbit (the WebUI login stays on the lab host): torrents by category and state, speeds, stalled and errored ones, files. Admins stop, start, recheck, delete, add torrents by magnet link or URL, set speed limits and manage categories.",
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "qBittorrent WebUI URL",
+        "required": true,
+        "placeholder": "http://torrent.lan:8080"
+      },
+      {
+        "key": "username",
+        "type": "text",
+        "label": "Username",
+        "required": true,
+        "help": "qBittorrent has one WebUI user"
+      },
+      {
+        "key": "password",
+        "type": "secret",
+        "label": "Password",
+        "required": true
+      }
+    ],
+    "validate": {
+      "method": "POST",
+      "path": "/api/_validate"
+    }
+  },
+  "backend": {
+    "url": "http://127.0.0.1:8113",
+    "health": "/healthz",
+    "timeout": 30
+  },
+  "connector": {},
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/categories"
+    },
+    {
+      "method": "GET",
+      "path": "/api/torrents/*/files"
+    },
+    {
+      "method": "POST",
+      "path": "/api/torrents/stop",
+      "min": "admin",
+      "label": "stop torrents",
+      "body_keys": [
+        "hashes"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/torrents/start",
+      "min": "admin",
+      "label": "start torrents",
+      "body_keys": [
+        "hashes"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/torrents/recheck",
+      "min": "admin",
+      "label": "recheck torrents",
+      "body_keys": [
+        "hashes"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/torrents/reannounce",
+      "min": "admin",
+      "label": "reannounce torrents",
+      "body_keys": [
+        "hashes"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/torrents/delete",
+      "min": "admin",
+      "label": "delete torrents (keep files)",
+      "body_keys": [
+        "hashes"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/torrents/delete-data",
+      "min": "admin",
+      "label": "delete torrents AND files",
+      "body_keys": [
+        "hashes"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/torrents/add",
+      "min": "admin",
+      "label": "add torrent (magnet link or URL)",
+      "body_keys": [
+        "urls",
+        "category",
+        "paused"
+      ],
+      "max_body": 32768
+    },
+    {
+      "method": "POST",
+      "path": "/api/categories",
+      "min": "admin",
+      "label": "set category",
+      "body_keys": [
+        "name",
+        "save_path"
+      ],
+      "max_body": 2048
+    },
+    {
+      "method": "POST",
+      "path": "/api/limits",
+      "min": "admin",
+      "label": "set global speed limits",
+      "body_keys": [
+        "dl",
+        "up"
+      ],
+      "max_body": 256
+    },
+    {
+      "method": "POST",
+      "path": "/api/alt-speed",
+      "min": "admin",
+      "label": "alternative speed limits on/off",
+      "body_keys": [
+        "enabled"
+      ],
+      "max_body": 256
+    }
+  ],
+  "settings": [
+    {
+      "key": "host",
+      "type": "text",
+      "default": "",
+      "label": "machine object qBittorrent runs on",
+      "help": "The lab object id of the host (for example the media server); the qBittorrent service is shown under it. Empty = no parent."
+    },
+    {
+      "key": "stalled_alert",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 500,
+      "label": "alert when this many downloads are stalled (0 = never)",
+      "help": "Errored torrents always alert"
+    }
+  ]
+}

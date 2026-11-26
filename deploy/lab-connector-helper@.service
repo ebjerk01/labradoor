@@ -1,0 +1,12 @@
+[Unit]
+Description=Labradoor connector helper (one request: user, key, start/stop of one connector)
+
+[Service]
+ExecStart=/usr/local/sbin/lab-connector-helper
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeMaxSec=120
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes

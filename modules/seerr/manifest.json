@@ -1,0 +1,442 @@
+{
+  "manifest": 2,
+  "id": "seerr",
+  "name": "Seerr",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "media",
+  "icon": "play",
+  "description": "Media requests through the lab connector seerr, per person: everyone with a linked Seerr account searches, discovers and requests AS THEMSELVES and sees only their own requests; admins run all of Seerr (requests, media, issues, users, settings, jobs). Identity (import/delete users, admin-level permissions, login and default access) is owner-only. No route ever returns a credential.",
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Seerr URL",
+        "required": true,
+        "placeholder": "http://seerr.lan:5055",
+        "help": "as the lab host reaches it"
+      },
+      {
+        "key": "api_key",
+        "type": "secret",
+        "label": "API key",
+        "required": true,
+        "help": "Seerr → Settings → General → API key"
+      },
+      {
+        "key": "public_url",
+        "type": "url",
+        "label": "Public URL",
+        "placeholder": "https://requests.example.com",
+        "help": "links in the UI (empty = the URL above)"
+      },
+      {
+        "key": "users",
+        "type": "list",
+        "label": "lab user = Seerr user",
+        "default": [],
+        "help": "labuser=seerruser (numeric Seerr id, Jellyfin username, Seerr username or e-mail); nobody else gets personal Seerr data"
+      }
+    ],
+    "validate": {
+      "method": "POST",
+      "path": "/api/_validate"
+    }
+  },
+  "backend": {
+    "url": "http://127.0.0.1:8114",
+    "health": "/healthz",
+    "timeout": 30
+  },
+  "connector": {},
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "guest_safe": true,
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/search"
+    },
+    {
+      "method": "GET",
+      "path": "/api/discover/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/movie/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/tv/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/person/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/img/*/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/requests"
+    },
+    {
+      "method": "POST",
+      "path": "/api/requests",
+      "min": "guest",
+      "label": "seerr: request media",
+      "max_body": 4096,
+      "body_keys": [
+        "type",
+        "tmdb",
+        "tvdb",
+        "seasons",
+        "is4k",
+        "serverId",
+        "profileId",
+        "rootFolder",
+        "languageProfileId",
+        "tags",
+        "userId"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/requests/*",
+      "min": "guest",
+      "label": "seerr: cancel / delete request"
+    },
+    {
+      "method": "GET",
+      "path": "/api/request-options",
+      "min": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/requests/bulk",
+      "min": "admin",
+      "label": "seerr: bulk approve / decline",
+      "body_keys": [
+        "verb",
+        "ids"
+      ],
+      "max_body": 4096
+    },
+    {
+      "method": "PUT",
+      "path": "/api/requests/*",
+      "min": "admin",
+      "label": "seerr: edit request",
+      "max_body": 4096,
+      "body_keys": [
+        "seasons",
+        "serverId",
+        "profileId",
+        "rootFolder",
+        "languageProfileId",
+        "tags",
+        "userId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/requests/*/approve",
+      "min": "admin",
+      "label": "seerr: approve request"
+    },
+    {
+      "method": "POST",
+      "path": "/api/requests/*/decline",
+      "min": "admin",
+      "label": "seerr: decline request"
+    },
+    {
+      "method": "POST",
+      "path": "/api/requests/*/retry",
+      "min": "admin",
+      "label": "seerr: retry failed request"
+    },
+    {
+      "method": "POST",
+      "path": "/api/media/*/status",
+      "min": "admin",
+      "label": "seerr: set media status",
+      "body_keys": [
+        "status",
+        "is4k"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/media/*/clear",
+      "min": "admin",
+      "label": "seerr: clear media data"
+    },
+    {
+      "method": "POST",
+      "path": "/api/media/*/delete-file",
+      "min": "admin",
+      "label": "seerr: DELETE media files (Sonarr/Radarr)",
+      "body_keys": [
+        "is4k"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/issues",
+      "min": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/issues/*",
+      "min": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/issues/*/comment",
+      "min": "admin",
+      "label": "seerr: comment on issue",
+      "body_keys": [
+        "message"
+      ],
+      "max_body": 8192
+    },
+    {
+      "method": "POST",
+      "path": "/api/issues/*/resolve",
+      "min": "admin",
+      "label": "seerr: resolve issue"
+    },
+    {
+      "method": "POST",
+      "path": "/api/issues/*/reopen",
+      "min": "admin",
+      "label": "seerr: reopen issue"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users",
+      "min": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/users/jellyfin",
+      "min": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/import",
+      "owner_only": true,
+      "label": "seerr: import users from Jellyfin",
+      "body_keys": [
+        "ids"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/*/permissions",
+      "min": "admin",
+      "label": "seerr: change user permissions (request / auto-approve / 4K / issues)",
+      "body_keys": [
+        "permissions"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/*/permissions/full",
+      "owner_only": true,
+      "label": "seerr: change user permissions incl. admin / manage users / settings",
+      "body_keys": [
+        "permissions"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/*/quota",
+      "min": "admin",
+      "label": "seerr: set user request quota",
+      "body_keys": [
+        "movieLimit",
+        "movieDays",
+        "tvLimit",
+        "tvDays"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/users/*",
+      "owner_only": true,
+      "label": "seerr: delete user"
+    },
+    {
+      "method": "GET",
+      "path": "/api/settings",
+      "min": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/main",
+      "min": "admin",
+      "label": "seerr: change general settings",
+      "body_keys": [
+        "applicationTitle",
+        "applicationUrl",
+        "hideAvailable",
+        "hideBlocklisted",
+        "partialRequestsEnabled",
+        "enableSpecialEpisodes",
+        "cacheImages",
+        "locale",
+        "discoverRegion",
+        "streamingRegion",
+        "originalLanguage",
+        "versionCheck",
+        "youtubeUrl"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/main/access",
+      "owner_only": true,
+      "label": "seerr: change login methods / default permissions + quotas",
+      "body_keys": [
+        "localLogin",
+        "mediaServerLogin",
+        "newPlexLogin",
+        "defaultPermissions",
+        "defaultQuotas"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/jellyfin/libraries/*",
+      "min": "admin",
+      "label": "seerr: Jellyfin libraries (enable / reload list)",
+      "max_body": 1024
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/jellyfin/sync/*",
+      "min": "admin",
+      "label": "seerr: Jellyfin full sync (start / cancel)"
+    },
+    {
+      "method": "GET",
+      "path": "/api/settings/radarr/*/options",
+      "min": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/settings/sonarr/*/options",
+      "min": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/radarr/*",
+      "min": "admin",
+      "label": "seerr: Radarr defaults (profile / root / availability)",
+      "body_keys": [
+        "activeProfileId",
+        "activeDirectory",
+        "minimumAvailability",
+        "isDefault",
+        "syncEnabled",
+        "preventSearch",
+        "tagRequests",
+        "externalUrl"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/sonarr/*",
+      "min": "admin",
+      "label": "seerr: Sonarr defaults (profile / root / anime / season folders)",
+      "body_keys": [
+        "activeProfileId",
+        "activeDirectory",
+        "activeAnimeProfileId",
+        "activeAnimeDirectory",
+        "enableSeasonFolders",
+        "isDefault",
+        "syncEnabled",
+        "preventSearch",
+        "tagRequests",
+        "externalUrl"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/radarr/*/test",
+      "min": "admin",
+      "label": "seerr: test Radarr connection"
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/sonarr/*/test",
+      "min": "admin",
+      "label": "seerr: test Sonarr connection"
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/notifications/*/test",
+      "min": "admin",
+      "label": "seerr: send test notification"
+    },
+    {
+      "method": "POST",
+      "path": "/api/settings/notifications/*/enabled",
+      "min": "admin",
+      "label": "seerr: notification agent on/off",
+      "body_keys": [
+        "enabled"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/jobs/*/run",
+      "min": "admin",
+      "label": "seerr: run job now"
+    },
+    {
+      "method": "POST",
+      "path": "/api/jobs/*/cancel",
+      "min": "admin",
+      "label": "seerr: cancel job"
+    },
+    {
+      "method": "POST",
+      "path": "/api/cache/*/flush",
+      "min": "admin",
+      "label": "seerr: flush cache"
+    }
+  ],
+  "settings": [
+    {
+      "key": "host",
+      "type": "text",
+      "default": "",
+      "label": "machine object Seerr runs on",
+      "help": "The lab object id of the host; the Seerr service is shown under it. Empty = no parent."
+    },
+    {
+      "key": "alert_pending_min",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 1440,
+      "label": "pending alert after (minutes)",
+      "help": "a pending request raises the admin alert only after waiting this long (0 = at once)"
+    }
+  ]
+}

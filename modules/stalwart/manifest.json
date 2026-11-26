@@ -1,0 +1,217 @@
+{
+  "manifest": 2,
+  "id": "stalwart",
+  "name": "Stalwart mail",
+  "version": "1.0.0",
+  "kind": "community",
+  "category": "apps",
+  "icon": "mail",
+  "description": "Stalwart mail server (0.16+, JMAP management) through the lab connector stalwart: queue, received DMARC/TLS/ARF reports, domains with DKIM and DNS records, accounts, blocked and allowed IPs. Admins retry queued mail; cancelling delivery, pausing the queue, accounts and unblocking are owner-only.",
+  "min_core": "0.1.0",
+  "requires": [
+    {
+      "id": "graylog",
+      "optional": true
+    }
+  ],
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Stalwart URL",
+        "required": true,
+        "placeholder": "http://mail.lan:8080",
+        "help": "The HTTP listener as the lab host reaches it; the JMAP endpoint is <url>/jmap/"
+      },
+      {
+        "key": "api_key",
+        "type": "secret",
+        "label": "API key",
+        "required": true,
+        "help": "Stalwart web UI → Account → Credentials → API keys (or x:ApiKey/set): an admin account's key narrowed with permissions Replace to what this module needs, allowed IPs = the lab host. Paste the API_… secret."
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true
+      },
+      {
+        "key": "protected_accounts",
+        "type": "list",
+        "label": "Protected accounts",
+        "default": [
+          "admin"
+        ],
+        "help": "Account names lab never disables, re-passwords or deletes (accounts with a role other than User are always protected)"
+      }
+    ],
+    "validate": {
+      "method": "POST",
+      "path": "/api/_validate"
+    }
+  },
+  "backend": {
+    "url": "http://127.0.0.1:8121",
+    "health": "/healthz",
+    "timeout": 30
+  },
+  "connector": {},
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/overview",
+      "query_keys": [
+        "fresh"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/queue/*"
+    },
+    {
+      "method": "POST",
+      "path": "/api/queue/*/retry",
+      "min": "admin",
+      "label": "Stalwart: retry queued message now",
+      "max_body": 64
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/queue/*",
+      "owner_only": true,
+      "label": "Stalwart: cancel delivery (delete queued message)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/queue/pause",
+      "owner_only": true,
+      "label": "Stalwart: pause the outgoing queue",
+      "max_body": 64
+    },
+    {
+      "method": "POST",
+      "path": "/api/queue/resume",
+      "owner_only": true,
+      "label": "Stalwart: resume the outgoing queue",
+      "max_body": 64
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports",
+      "query_keys": [
+        "kind"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/*/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/domains/*/dns"
+    },
+    {
+      "method": "POST",
+      "path": "/api/accounts",
+      "owner_only": true,
+      "label": "Stalwart: create mail account",
+      "body_keys": [
+        "name",
+        "domain",
+        "description",
+        "password",
+        "disabled"
+      ],
+      "max_body": 2048
+    },
+    {
+      "method": "POST",
+      "path": "/api/accounts/*/disable",
+      "owner_only": true,
+      "label": "Stalwart: disable sign-in of mail account",
+      "max_body": 64
+    },
+    {
+      "method": "POST",
+      "path": "/api/accounts/*/enable",
+      "owner_only": true,
+      "label": "Stalwart: enable sign-in of mail account",
+      "max_body": 64
+    },
+    {
+      "method": "POST",
+      "path": "/api/accounts/*/password",
+      "owner_only": true,
+      "label": "Stalwart: set mail account password",
+      "body_keys": [
+        "password"
+      ],
+      "max_body": 1024
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/accounts/*",
+      "owner_only": true,
+      "label": "Stalwart: delete mail account"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/blocked/*",
+      "owner_only": true,
+      "label": "Stalwart: unblock IP address"
+    }
+  ],
+  "settings": [
+    {
+      "key": "object",
+      "type": "text",
+      "default": "stalwart",
+      "label": "lab object the mail server shows on",
+      "help": "The id of the mail server's machine object (e.g. its container's name): the stalwart facet and status go there"
+    },
+    {
+      "key": "queue_alert",
+      "type": "int",
+      "default": 10,
+      "min": 0,
+      "max": 10000,
+      "label": "alert when this many messages are queued (0 = never)"
+    },
+    {
+      "key": "stuck_hours",
+      "type": "int",
+      "default": 6,
+      "min": 0,
+      "max": 720,
+      "label": "alert when a queued message is older than this many hours (0 = never)"
+    },
+    {
+      "key": "blocked_day_alert",
+      "type": "int",
+      "default": 20,
+      "min": 0,
+      "max": 10000,
+      "label": "alert when this many IPs were blocked in the last 24 h (0 = never)"
+    },
+    {
+      "key": "log_query",
+      "type": "text",
+      "default": "source:stalwart",
+      "label": "Graylog query for the server's logs",
+      "help": "Used for the auth-failure count and log links when the graylog module is active"
+    }
+  ]
+}

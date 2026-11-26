@@ -1,0 +1,285 @@
+{
+  "manifest": 2,
+  "id": "ai",
+  "name": "AI assistant",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "tools",
+  "icon": "shell",
+  "description": "Claude (claude-opus-5-5) inside lab: chat that reads lab as you (never more, never secrets), proposes fixes you run with a click, triages new alerts, writes a morning summary. Hard monthly spending cap. Connector :8117.",
+  "requires": [
+    "*"
+  ],
+  "delegate": true,
+  "config": {
+    "fields": [
+      {
+        "key": "api_key",
+        "type": "secret",
+        "label": "Claude API key",
+        "required": true,
+        "help": "console.anthropic.com → API keys (use a workspace with a spending limit)"
+      },
+      {
+        "key": "background",
+        "type": "text",
+        "multiline": true,
+        "label": "About this installation",
+        "help": "what the assistant should know: who is who, which machines matter, what counts as noise (it verifies live state with its tools)"
+      }
+    ],
+    "validate": {
+      "method": "POST",
+      "path": "/api/_validate"
+    }
+  },
+  "backend": {
+    "url": "http://127.0.0.1:8117",
+    "health": "/healthz",
+    "timeout": 30
+  },
+  "connector": {},
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/state"
+    },
+    {
+      "method": "GET",
+      "path": "/api/usage"
+    },
+    {
+      "method": "GET",
+      "path": "/api/conversations"
+    },
+    {
+      "method": "GET",
+      "path": "/api/conversations/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/conversations/*/live"
+    },
+    {
+      "method": "POST",
+      "path": "/api/conversations",
+      "min": "admin",
+      "label": "ai: new chat",
+      "body_keys": [
+        "context",
+        "text"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/conversations/*/messages",
+      "min": "admin",
+      "label": "ai: ask",
+      "body_keys": [
+        "text",
+        "context"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/conversations/*/stop",
+      "min": "admin",
+      "label": "ai: stop answer",
+      "audit": false
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/conversations/*",
+      "min": "admin",
+      "label": "ai: delete chat"
+    },
+    {
+      "method": "POST",
+      "path": "/api/proposals/*/result",
+      "min": "admin",
+      "label": "ai: proposal outcome",
+      "body_keys": [
+        "outcome",
+        "code",
+        "excerpt",
+        "approval"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/triage",
+      "min": "admin",
+      "label": "ai: triage alert",
+      "body_keys": [
+        "key"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/sync",
+      "min": "admin",
+      "label": "ai: alert snapshot",
+      "audit": false,
+      "body_keys": [
+        "alerts",
+        "objects"
+      ],
+      "max_body": 524288
+    }
+  ],
+  "settings": [
+    {
+      "key": "admins",
+      "type": "bool",
+      "default": true,
+      "label": "admins may use the assistant",
+      "help": "owner always may; guests never"
+    },
+    {
+      "key": "monthly_cap",
+      "type": "int",
+      "default": 90,
+      "min": 1,
+      "max": 100,
+      "label": "monthly spending cap ($)",
+      "help": "hard stop for all AI calls (Max plan credits: $100/month, no rollover)"
+    },
+    {
+      "key": "owner_share",
+      "type": "int",
+      "default": 100,
+      "min": 0,
+      "max": 100,
+      "label": "owner's share of the cap (%)"
+    },
+    {
+      "key": "admin_share",
+      "type": "int",
+      "default": 25,
+      "min": 0,
+      "max": 100,
+      "label": "each admin's share of the cap (%)",
+      "help": "per admin, per month; triage + summary count only against the cap"
+    },
+    {
+      "key": "reset_day",
+      "type": "int",
+      "default": 1,
+      "min": 1,
+      "max": 28,
+      "label": "budget resets on day",
+      "help": "the day the API credits renew (approximate is fine)"
+    },
+    {
+      "key": "chat_effort",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "medium",
+      "label": "chat effort",
+      "help": "more effort = deeper answers, more cost"
+    },
+    {
+      "key": "triage",
+      "type": "bool",
+      "default": true,
+      "label": "triage new alerts",
+      "help": "one short investigation per NEW alert, shown on the alert's object"
+    },
+    {
+      "key": "triage_warn",
+      "type": "bool",
+      "default": false,
+      "label": "also triage warnings",
+      "help": "off: only bad (■) alerts"
+    },
+    {
+      "key": "triage_effort",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium"
+      ],
+      "default": "low",
+      "label": "triage effort"
+    },
+    {
+      "key": "triage_daily_max",
+      "type": "int",
+      "default": 20,
+      "min": 0,
+      "max": 200,
+      "label": "max triages per day"
+    },
+    {
+      "key": "triage_cooldown_hours",
+      "type": "int",
+      "default": 12,
+      "min": 1,
+      "max": 168,
+      "label": "hours before the same alert is triaged again"
+    },
+    {
+      "key": "summary",
+      "type": "bool",
+      "default": true,
+      "label": "morning summary",
+      "help": "written once a day after the time below, the first time lab is open; shown in lab, not mailed"
+    },
+    {
+      "key": "summary_time",
+      "type": "text",
+      "default": "07:30",
+      "max": 5,
+      "label": "morning summary after (HH:MM)"
+    },
+    {
+      "key": "summary_email",
+      "type": "bool",
+      "default": false,
+      "label": "mail the morning summary",
+      "help": "reserved: not sent yet (alert mail is noisy, see alert-email-policy)"
+    },
+    {
+      "key": "auto_fix",
+      "type": "bool",
+      "default": false,
+      "label": "auto-fix (hook only)",
+      "help": "reserved: the gateway never lets the assistant write, so proposals still need a click"
+    },
+    {
+      "key": "retention_days",
+      "type": "int",
+      "default": 30,
+      "min": 1,
+      "max": 365,
+      "label": "keep conversations (days)"
+    },
+    {
+      "key": "max_tool_calls",
+      "type": "int",
+      "default": 12,
+      "min": 2,
+      "max": 30,
+      "label": "max tool rounds per answer"
+    },
+    {
+      "key": "tool_result_chars",
+      "type": "int",
+      "default": 12000,
+      "min": 2000,
+      "max": 50000,
+      "label": "max characters per tool result"
+    }
+  ]
+}

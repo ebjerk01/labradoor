@@ -1,0 +1,338 @@
+{
+  "manifest": 2,
+  "id": "radarr",
+  "name": "Radarr",
+  "version": "2.2.0",
+  "kind": "community",
+  "category": "media",
+  "icon": "play",
+  "description": "Movies in Radarr: queue, stuck/failed downloads (remove, manual import), wanted, calendar, health, disks, the library (search, interactive search, edit, delete). Shown together in the Media view.",
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Server URL",
+        "required": true,
+        "placeholder": "http://host:7878"
+      },
+      {
+        "key": "api_key",
+        "type": "secret",
+        "label": "API key",
+        "required": true,
+        "help": "Radarr → Settings → General → API key"
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true
+      }
+    ],
+    "validate": {
+      "method": "GET",
+      "path": "/api/v3/system/status",
+      "expect": [
+        200
+      ]
+    }
+  },
+  "backend": {
+    "url": "{url}",
+    "health": "/ping",
+    "timeout": 45,
+    "tls_verify": "{verify_tls}",
+    "auth": {
+      "type": "header",
+      "name": "X-Api-Key",
+      "secret": "api_key"
+    }
+  },
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/v3/system/status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/health"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/queue"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/queue/status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/wanted/missing"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/wanted/cutoff"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/calendar"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/diskspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/command"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/movie"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/qualityprofile"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/manualimport",
+      "query_keys": [
+        "downloadId",
+        "filterExistingFiles",
+        "movieId"
+      ],
+      "cache": 0,
+      "timeout": 60
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/release",
+      "query_keys": [
+        "movieId"
+      ],
+      "cache": 0,
+      "timeout": 95
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/command",
+      "min": "admin",
+      "label": "radarr command (search / refresh / rescan / health / manual import)",
+      "body_schema": {
+        "type": "object",
+        "by": "name",
+        "cases": {
+          "MissingMoviesSearch": {},
+          "CutOffUnmetMoviesSearch": {},
+          "RefreshMonitoredDownloads": {},
+          "CheckHealth": {},
+          "RefreshMovie": {
+            "keys": {
+              "movieIds": {
+                "type": "list",
+                "min": 1,
+                "max": 1000,
+                "items": {
+                  "type": "int",
+                  "min": 0
+                }
+              }
+            }
+          },
+          "MoviesSearch": {
+            "keys": {
+              "movieIds": {
+                "type": "list",
+                "min": 1,
+                "max": 500,
+                "items": {
+                  "type": "int",
+                  "min": 0
+                }
+              }
+            },
+            "required": [
+              "movieIds"
+            ]
+          },
+          "ManualImport": {
+            "keys": {
+              "files": {
+                "type": "list",
+                "min": 1,
+                "max": 200,
+                "items": {
+                  "type": "object",
+                  "keys": {
+                    "path": {
+                      "type": "string",
+                      "max": 1024,
+                      "prefix": [
+                        "{import_paths}"
+                      ]
+                    },
+                    "movieId": {
+                      "type": "int",
+                      "min": 0
+                    },
+                    "quality": {
+                      "type": "object",
+                      "null": true,
+                      "keys": {
+                        "quality": {
+                          "type": "object",
+                          "keys": {
+                            "id": "int",
+                            "name": {
+                              "type": "string",
+                              "max": 100
+                            },
+                            "source": {
+                              "type": "string",
+                              "max": 40
+                            },
+                            "resolution": "int",
+                            "modifier": {
+                              "type": "string",
+                              "max": 40
+                            }
+                          }
+                        },
+                        "revision": {
+                          "type": "object",
+                          "keys": {
+                            "version": "int",
+                            "real": "int",
+                            "isRepack": "bool"
+                          }
+                        }
+                      }
+                    },
+                    "languages": {
+                      "type": "list",
+                      "null": true,
+                      "max": 20,
+                      "items": {
+                        "type": "object",
+                        "keys": {
+                          "id": "int",
+                          "name": {
+                            "type": "string",
+                            "max": 100
+                          }
+                        }
+                      }
+                    },
+                    "releaseGroup": {
+                      "type": "string",
+                      "null": true,
+                      "max": 200
+                    },
+                    "indexerFlags": "int",
+                    "downloadId": {
+                      "type": "string",
+                      "max": 200
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "movieId"
+                  ]
+                }
+              },
+              "importMode": {
+                "type": "string",
+                "enum": [
+                  "auto"
+                ]
+              }
+            },
+            "required": [
+              "files"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/release",
+      "min": "admin",
+      "label": "radarr: grab a release",
+      "body_keys": [
+        "guid",
+        "indexerId"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v3/movie/editor",
+      "min": "admin",
+      "label": "radarr: edit movie (monitored, quality profile)",
+      "body_keys": [
+        "movieIds",
+        "monitored",
+        "qualityProfileId",
+        "minimumAvailability"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v3/queue/*",
+      "min": "admin",
+      "label": "radarr: remove download + blocklist",
+      "query_keys": [
+        "removeFromClient",
+        "blocklist",
+        "skipRedownload"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v3/movie/*",
+      "owner_only": true,
+      "label": "radarr: delete movie (optionally with its files)",
+      "query_keys": [
+        "deleteFiles",
+        "addImportListExclusion"
+      ]
+    }
+  ],
+  "settings": [
+    {
+      "key": "parent",
+      "type": "text",
+      "label": "machine object this runs on",
+      "help": "the lab object id of the host (its facets and this service group under it); empty = none"
+    },
+    {
+      "key": "calendar_days",
+      "type": "int",
+      "default": 30,
+      "min": 1,
+      "max": 90,
+      "label": "calendar days ahead"
+    },
+    {
+      "key": "alert_blocked",
+      "type": "bool",
+      "default": true,
+      "label": "alert on downloads blocked from import",
+      "help": "failed downloads always alert"
+    },
+    {
+      "key": "import_paths",
+      "type": "list",
+      "label": "manual import: allowed folders",
+      "help": "the folders a manual import may take files from, as the app sees them (the download client's folder, e.g. /downloads/); empty = manual import is off"
+    }
+  ]
+}

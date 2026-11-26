@@ -1,0 +1,138 @@
+{
+  "manifest": 2,
+  "id": "guacamole",
+  "name": "Guacamole",
+  "version": "2.2.0",
+  "kind": "community",
+  "category": "infrastructure",
+  "icon": "shell",
+  "description": "Remote consoles: a terminal/console on every machine that has a Guacamole connection, opened through an audited lab route (owner; admins only with a time-limited grant the owner approves), active session counts. Through the guacamole connector (read-only Guacamole user); the console signs in with the viewer's own Guacamole account.",
+  "requires": [
+    {
+      "id": "proxmox",
+      "optional": true
+    },
+    {
+      "id": "drift",
+      "optional": true
+    }
+  ],
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Guacamole URL",
+        "required": true,
+        "placeholder": "http://guacamole.lan:8080",
+        "help": "as the lab host reaches it (the REST API is under /api)"
+      },
+      {
+        "key": "username",
+        "type": "text",
+        "label": "Service user",
+        "required": true,
+        "help": "READ on the connections, no system permissions"
+      },
+      {
+        "key": "password",
+        "type": "secret",
+        "label": "Password",
+        "required": true
+      },
+      {
+        "key": "public_url",
+        "type": "url",
+        "label": "Public URL",
+        "placeholder": "https://remote.example.com",
+        "help": "where browsers open consoles (empty = the URL above)"
+      },
+      {
+        "key": "admin_terminals",
+        "type": "bool",
+        "label": "Admins may ask for terminals",
+        "default": false,
+        "help": "off: consoles are owner-only. on: an admin asks the owner (approval) and gets one machine for the minutes below"
+      },
+      {
+        "key": "grant_minutes",
+        "type": "int",
+        "label": "Admin grant (minutes)",
+        "default": 30,
+        "min": 5,
+        "max": 240
+      }
+    ],
+    "validate": {
+      "method": "POST",
+      "path": "/api/_validate"
+    }
+  },
+  "backend": {
+    "url": "http://127.0.0.1:8112",
+    "health": "/healthz",
+    "timeout": 15
+  },
+  "connector": {},
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/connections"
+    },
+    {
+      "method": "GET",
+      "path": "/api/status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions",
+      "query_keys": [
+        "id"
+      ],
+      "cache": 0
+    },
+    {
+      "method": "POST",
+      "path": "/api/open/*/*",
+      "min": "admin",
+      "label": "open console",
+      "max_body": 64,
+      "query_keys": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/grant/*/*",
+      "owner_only": true,
+      "label": "terminal grant for an admin",
+      "max_body": 64,
+      "query_keys": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/revoke",
+      "owner_only": true,
+      "label": "revoke terminal grants",
+      "body_keys": [
+        "user",
+        "id"
+      ],
+      "max_body": 512
+    }
+  ],
+  "settings": [
+    {
+      "key": "aliases",
+      "type": "list",
+      "default": [],
+      "label": "connection name → object id",
+      "help": "For connections whose name doesn't say which lab object they are: \"cisco vwlc=vwlc810\" (comma-separated). A \"(CT 112)\" hint in the name already maps to that guest."
+    }
+  ]
+}

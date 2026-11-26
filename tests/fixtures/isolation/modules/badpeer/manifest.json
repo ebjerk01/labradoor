@@ -1,0 +1,2 @@
+{ "manifest": 2, "id": "badpeer", "name": "badpeer", "version": "1.0.0", "kind": "community", "category": "tools",
+  "requires": ["leaf", { "id": "maybe", "optional": true }] }

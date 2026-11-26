@@ -1,0 +1,17 @@
+{
+  "manifest": 2,
+  "id": "domains",
+  "name": "Domains",
+  "version": "2.0.0",
+  "kind": "community",
+  "category": "network",
+  "icon": "globe",
+  "description": "One row per hostname: DNS (+proxied/Access) → reverse-proxy host → backend → monitoring checks → cert → status. Flags dead-host candidates for a proxy cleanup (read-only; deletes nothing). No backend: joins the npm, cloudflare, unifi and drift modules' data in the browser.",
+  "requires": [
+    { "id": "npm" },
+    { "id": "cloudflare" },
+    { "id": "unifi", "optional": true },
+    { "id": "drift", "optional": true }
+  ],
+  "access": { "roles": ["owner", "admin"], "groups": [] }
+}

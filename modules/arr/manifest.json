@@ -1,0 +1,48 @@
+{
+  "manifest": 2,
+  "id": "arr",
+  "name": "Media",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "media",
+  "icon": "play",
+  "description": "The media stack in one place: the Media view and wall tiles combine sonarr, radarr, prowlarr, bazarr, qbit, jellyfin and seerr (each keeps its own backend and routes). No backend of its own.",
+  "requires": [
+    {
+      "id": "sonarr",
+      "optional": true
+    },
+    {
+      "id": "radarr",
+      "optional": true
+    },
+    {
+      "id": "prowlarr",
+      "optional": true
+    },
+    {
+      "id": "bazarr",
+      "optional": true
+    },
+    {
+      "id": "qbit",
+      "optional": true
+    },
+    {
+      "id": "jellyfin",
+      "optional": true
+    },
+    {
+      "id": "seerr",
+      "optional": true
+    }
+  ],
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": []
+}

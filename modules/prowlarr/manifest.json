@@ -1,0 +1,112 @@
+{
+  "manifest": 2,
+  "id": "prowlarr",
+  "name": "Prowlarr",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "media",
+  "icon": "search",
+  "description": "Indexers on media-host: per-indexer queries/grabs/failures (7 days), back-off status, health. The indexer config (it can hold tracker credentials) is owner-only.",
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Server URL",
+        "required": true,
+        "placeholder": "http://host:9696"
+      },
+      {
+        "key": "api_key",
+        "type": "secret",
+        "label": "API key",
+        "required": true,
+        "help": "Prowlarr → Settings → General → API key"
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true
+      }
+    ],
+    "validate": {
+      "method": "GET",
+      "path": "/api/v1/system/status",
+      "expect": [
+        200
+      ]
+    }
+  },
+  "backend": {
+    "url": "{url}",
+    "health": "/ping",
+    "timeout": 30,
+    "tls_verify": "{verify_tls}",
+    "auth": {
+      "type": "header",
+      "name": "X-Api-Key",
+      "secret": "api_key"
+    }
+  },
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/v1/system/status"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/health"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/indexerstats"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/indexerstatus"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/indexer",
+      "owner_only": true,
+      "secret": true,
+      "label": "read indexer config (may hold tracker credentials)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/indexer/testall",
+      "min": "admin",
+      "label": "prowlarr: test all indexers",
+      "timeout": 95
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/command",
+      "min": "admin",
+      "label": "prowlarr command (app sync / health)",
+      "body_allow": {
+        "name": [
+          "ApplicationIndexerSync",
+          "CheckHealth",
+          "prowlarr"
+        ]
+      }
+    }
+  ],
+  "settings": [
+    {
+      "key": "parent",
+      "type": "text",
+      "label": "machine object this runs on",
+      "help": "the lab object id of the host (its facets and this service group under it); empty = none"
+    }
+  ]
+}

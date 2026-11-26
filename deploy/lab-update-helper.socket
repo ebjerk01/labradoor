@@ -1,0 +1,13 @@
+[Unit]
+Description=Labradoor update helper (socket; only the gateway's group and root may connect)
+
+[Socket]
+ListenStream=/run/lab-update-helper.sock
+SocketUser=root
+SocketGroup=lab
+SocketMode=0660
+Accept=yes
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target
