@@ -1,0 +1,37 @@
+name: Bug report
+description: Something in Labradoor doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Labradoor version
+      description: From Settings → Updates, or the VERSION file.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - gateway / core
+        - a module
+        - install / update
+        - login / SSO
+        - the UI
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Gateway logs or the browser console. Redact tokens, hostnames and anything private.
+      render: shell

@@ -1,0 +1,162 @@
+{
+  "manifest": 2,
+  "id": "dns",
+  "name": "Technitium DNS",
+  "version": "2.2.0",
+  "kind": "community",
+  "category": "network",
+  "icon": "search",
+  "description": "Technitium DNS Server: query stats, top clients and domains, zones and records, cache flush, allowed and blocked domains.",
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Server URL",
+        "required": true,
+        "placeholder": "http://dns.example:5380"
+      },
+      {
+        "key": "token",
+        "type": "secret",
+        "label": "API token",
+        "required": true,
+        "help": "A dedicated Technitium user with the least rights: Dashboard view, Zones view, Cache view + delete; give it per-zone view/modify/delete on each zone it may edit; for the allow/block lists also Allowed and Blocked view + modify + delete (Administration → Permissions → Allowed / Blocked → user). Then Administration → Sessions → Create Token."
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true
+      }
+    ],
+    "validate": {
+      "method": "GET",
+      "path": "/api/user/session/get",
+      "expect": [
+        200
+      ],
+      "json": {
+        "status": "ok"
+      }
+    }
+  },
+  "backend": {
+    "url": "{url}",
+    "health": "/",
+    "timeout": 20,
+    "tls_verify": "{verify_tls}",
+    "auth": {
+      "type": "bearer",
+      "secret": "token"
+    }
+  },
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/dashboard/stats/get"
+    },
+    {
+      "method": "GET",
+      "path": "/api/dashboard/stats/getTop"
+    },
+    {
+      "method": "GET",
+      "path": "/api/zones/list"
+    },
+    {
+      "method": "GET",
+      "path": "/api/zones/records/get"
+    },
+    {
+      "method": "POST",
+      "path": "/api/zones/records/add",
+      "min": "admin",
+      "label": "add DNS record (technitium)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/zones/records/update",
+      "min": "admin",
+      "label": "edit DNS record (technitium)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/cache/flush",
+      "min": "admin",
+      "label": "flush DNS cache"
+    },
+    {
+      "method": "POST",
+      "path": "/api/zones/records/delete",
+      "owner_only": true,
+      "label": "delete DNS record (technitium)"
+    },
+    {
+      "method": "GET",
+      "path": "/api/allowed/list",
+      "query_keys": [
+        "domain"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/blocked/list",
+      "query_keys": [
+        "domain"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/allowed/add",
+      "min": "admin",
+      "label": "allow a domain (technitium)",
+      "query_keys": [
+        "domain"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/allowed/delete",
+      "min": "admin",
+      "label": "remove an allowed domain (technitium)",
+      "query_keys": [
+        "domain"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/blocked/add",
+      "min": "admin",
+      "label": "block a domain (technitium)",
+      "query_keys": [
+        "domain"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/blocked/delete",
+      "min": "admin",
+      "label": "unblock a domain (technitium)",
+      "query_keys": [
+        "domain"
+      ]
+    }
+  ],
+  "settings": [
+    {
+      "key": "machine_id",
+      "type": "text",
+      "default": "",
+      "label": "machine object id",
+      "help": "The lab object (machine) the DNS server runs on: its panel shows the resolver stats."
+    }
+  ]
+}

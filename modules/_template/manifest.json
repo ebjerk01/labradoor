@@ -1,0 +1,32 @@
+{
+  "manifest": 2,
+  "id": "__ID__",
+  "name": "__NAME__",
+  "version": "0.1.0",
+  "kind": "community",
+  "category": "tools",
+  "icon": "node",
+  "description": "What __NAME__ does, one line.",
+  "config": {
+    "fields": [
+      { "key": "url", "type": "url", "label": "Server URL", "required": true, "default": "__BACKEND__", "placeholder": "http://host:port" },
+      { "key": "api_key", "type": "secret", "label": "API key", "required": true, "help": "Where to find it in __NAME__" },
+      { "key": "verify_tls", "type": "bool", "label": "Verify TLS certificate", "default": true }
+    ],
+    "validate": { "method": "GET", "path": "/api/status", "expect": [200] }
+  },
+  "backend": {
+    "url": "{url}", "health": "/api/status", "timeout": 20, "tls_verify": "{verify_tls}",
+    "auth": { "type": "header", "name": "X-Api-Key", "secret": "api_key" }
+  },
+  "access": { "roles": ["owner", "admin"], "groups": [] },
+  "routes": [
+    { "method": "GET",  "path": "/api/status" },
+    { "method": "GET",  "path": "/api/items" },
+    { "method": "POST", "path": "/api/restart", "min": "admin", "label": "restart __ID__" },
+    { "method": "POST", "path": "/api/secret-thing", "owner_only": true, "label": "rotate __ID__ secret" }
+  ],
+  "settings": [
+    { "key": "example", "type": "bool", "default": true, "label": "an example switch", "help": "read it in ui/index.js as ctx.settings.example" }
+  ]
+}

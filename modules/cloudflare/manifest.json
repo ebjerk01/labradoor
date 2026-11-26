@@ -1,0 +1,43 @@
+{
+  "manifest": 2,
+  "id": "cloudflare",
+  "name": "Cloudflare",
+  "version": "2.0.0",
+  "kind": "community",
+  "category": "network",
+  "icon": "cloud",
+  "description": "DNS records, proxied flags and Zero Trust Access apps for the zones a Cloudflare API token can see. DNS edits and cache purge: admin. Record delete and Access policy edits: owner. Traffic analytics belong to a monitoring module.",
+  "config": {
+    "fields": [
+      { "key": "url", "type": "url", "label": "API URL", "default": "https://api.cloudflare.com/client/v4",
+        "help": "Leave as is unless you go through a proxy." },
+      { "key": "token", "type": "secret", "label": "API token", "required": true,
+        "help": "My Profile → API Tokens → Create Token. Needs Zone:Read, DNS:Edit, Cache Purge on the zones you manage, and Access: Apps and Policies Edit (account) for the Access tab." }
+    ],
+    "validate": { "method": "GET", "path": "/user/tokens/verify", "expect": [200], "json": { "success": true } }
+  },
+  "backend": {
+    "url": "{url}", "health": "/ips", "timeout": 20,
+    "auth": { "type": "bearer", "secret": "token" }
+  },
+  "access": { "roles": ["owner", "admin"], "groups": [] },
+  "routes": [
+    { "method": "GET",    "path": "/zones", "query_keys": ["per_page", "page"] },
+    { "method": "GET",    "path": "/zones/*/dns_records", "query_keys": ["per_page", "page"] },
+    { "method": "GET",    "path": "/accounts/*/access/apps", "query_keys": ["per_page", "page"] },
+    { "method": "GET",    "path": "/accounts/*/access/policies", "query_keys": ["per_page", "page"] },
+
+    { "method": "POST",   "path": "/zones/*/dns_records",               "min": "admin", "label": "add DNS record",
+      "body_keys": ["type", "name", "content", "ttl", "proxied", "comment", "priority"] },
+    { "method": "PATCH",  "path": "/zones/*/dns_records/*",             "min": "admin", "label": "edit DNS record",
+      "body_keys": ["content", "ttl", "proxied", "comment", "priority"] },
+    { "method": "POST",   "path": "/zones/*/purge_cache",               "min": "admin", "label": "purge Cloudflare cache",
+      "body_keys": ["hosts"] },
+    { "method": "DELETE", "path": "/zones/*/dns_records/*",             "owner_only": true, "label": "delete DNS record" },
+    { "method": "PUT",    "path": "/accounts/*/access/policies/*",      "owner_only": true, "label": "edit Access policy",
+      "body_keys": ["name", "decision", "include", "exclude", "require", "session_duration"] }
+  ],
+  "settings": [
+    { "key": "hub", "type": "text", "default": "", "label": "hub object", "help": "The lab object id of the topology node that stands for Cloudflare, so the zone and Access summary shows on it." }
+  ]
+}

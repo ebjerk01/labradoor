@@ -1,0 +1,16 @@
+name: Feature or module request
+description: Suggest an improvement, or support for a service Labradoor doesn't cover yet
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: The problem you're trying to solve, and how you'd expect it to work.
+    validations:
+      required: true
+  - type: input
+    id: service
+    attributes:
+      label: Service (for a new module)
+      description: 'e.g. Pi-hole, TrueNAS, Home Assistant — include a link to its API docs if you can.'

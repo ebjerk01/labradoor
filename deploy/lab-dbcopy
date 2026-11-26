@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""Root's only way to copy a Labradoor database out of, or back into, a directory another user controls
+(installed as /usr/local/sbin/lab-dbcopy; deploy/install.sh and deploy/lab-rollback use it).
+
+  lab-dbcopy backup  --as USER SRC DEST   a consistent copy of the SQLite database SRC (sqlite backup API, safe while
+                                          the gateway runs), READ AS USER, into DEST: a new file (0600) in a directory
+                                          only root can write. Exit 3 when SRC does not exist.
+  lab-dbcopy restore --as USER SRC DEST   put the backup SRC (a regular file in root's backup tree) in place as DEST,
+                                          WRITTEN AS USER: DEST's -wal/-shm/-journal go, the copy lands atomically (0600)
+  lab-dbcopy adopt OLD ROOT               move the backups of an old layout (OLD = /var/lib/lab/backups, inside the
+                                          gateway's directory) into ROOT (/var/lib/lab-backups); anything that is not
+                                          root's own real directory there is dropped, never followed
+  lab-dbcopy prune ROOT                   keep the 10 newest release backups and the 5 newest rollback-* snapshots
+
+Why (security review 2026-11-15, H2): /var/lib/lab belongs to the gateway's user `lab`, /var/lib/lab-connectors/<id> to
+a connector's user. Anything running as that user can put symlinks or hard links there, so root never opens, copies,
+chmods or chowns a path inside such a directory. The user's side of every copy runs in a child process that has dropped
+to USER first: whatever it opens, the user could open anyway. Root's side only touches the backup tree (root 0700),
+opened with O_NOFOLLOW / O_EXCL, after checking that the directory is a real one that only root can write.
+
+Run as a normal user (the tests), --as must name that user and "root" means the current user.
+"""
+import os
+import pwd
+import re
+import shutil
+import sqlite3
+import stat
+import sys
+import tempfile
+import urllib.parse
+
+MISSING = 3
+COPY_MAX = 4 << 30
+KEEP_RELEASES = 10
+KEEP_ROLLBACKS = 5
+RELEASE_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9A-Za-z._-]{1,40}$")
+ROLLBACK_RE = re.compile(r"^rollback-[0-9]{8}-[0-9]{6}-[0-9A-Za-z._-]{1,80}$")
+
+
+class Fail(Exception):
+    def __init__(self, msg, code=1):
+        super().__init__(msg)
+        self.code = code
+
+
+def user(name):
+    try:
+        pw = pwd.getpwnam(name)
+    except KeyError:
+        raise Fail(f"no such user: {name}") from None
+    if os.geteuid() == 0:
+        if pw.pw_uid == 0:
+            raise Fail("--as root is refused: name the user that owns the database")
+    elif pw.pw_uid != os.geteuid():
+        raise Fail(f"only root can act as {name}")
+    return pw
+
+
+def root_dir(path):
+    """A directory only we (root) can write: a real directory (not a symlink), ours, not group/other-writable — and so
+    is its parent. Raises Fail otherwise."""
+    path = os.path.abspath(path)
+    for p in (path, os.path.dirname(path)):
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            raise Fail(f"{p}: missing") from None
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise Fail(f"{p}: not a real directory (a symlink?) — refused")
+        if st.st_uid != os.geteuid():
+            raise Fail(f"{p}: not owned by {'root' if os.geteuid() == 0 else 'this user'} — refused")
+        if st.st_mode & 0o022:
+            raise Fail(f"{p}: writable by group/others — refused")
+    return path
+
+
+def _become(pw):
+    if os.geteuid() == 0:
+        os.setgroups([])
+        os.setgid(pw.pw_gid)
+        os.setuid(pw.pw_uid)
+        if os.getuid() == 0 or os.geteuid() == 0:
+            raise Fail("could not drop root")
+    os.umask(0o077)
+    os.chdir("/")
+
+
+def _spawn(pw, fn, keep=()):
+    """Run fn() in a child process that is USER (never root); returns its pid. Only the fds in keep stay open."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        code = 1
+        try:
+            hi = os.sysconf("SC_OPEN_MAX") if hasattr(os, "sysconf") else 1024
+            last = 3
+            for fd in sorted(set(keep)):
+                os.closerange(last, fd)
+                last = fd + 1
+            os.closerange(last, hi)
+            _become(pw)
+            fn()
+            code = 0
+        except Fail as e:
+            print(f"lab-dbcopy: {e}", file=sys.stderr)
+            code = e.code
+        except BaseException as e:  # noqa: BLE001
+            print(f"lab-dbcopy: {e.__class__.__name__}: {e}", file=sys.stderr)
+        finally:
+            try:
+                sys.stderr.flush()
+            finally:
+                os._exit(code)
+    return pid
+
+
+def _wait(pid):
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
+
+
+def _copy_fd(src, dst, limit=COPY_MAX):
+    n = 0
+    while True:
+        chunk = os.read(src, 1 << 20)
+        if not chunk:
+            return n
+        n += len(chunk)
+        if n > limit:
+            raise Fail("database copy too large")
+        view = memoryview(chunk)
+        while view:
+            view = view[os.write(dst, view):]
+
+
+# --- backup: the user's database → root's tree ----------------------------------------------------------------------
+def _read_db(src, out):
+    """In the child (as the owner): a consistent copy of src, streamed to fd out."""
+    try:
+        st = os.lstat(src)
+    except FileNotFoundError:
+        raise Fail(f"{src}: no such database", MISSING) from None
+    if not stat.S_ISREG(st.st_mode):
+        raise Fail(f"{src}: not a regular file (a symlink?) — refused")
+    with tempfile.TemporaryDirectory(prefix="lab-dbcopy-") as d:
+        tmp = os.path.join(d, "copy.sqlite3")
+        s = sqlite3.connect(f"file:{urllib.parse.quote(src)}?mode=rw", uri=True, timeout=60)
+        try:
+            dst = sqlite3.connect(tmp)
+            try:
+                s.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            s.close()
+        fd = os.open(tmp, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            _copy_fd(fd, out)
+        finally:
+            os.close(fd)
+
+
+def backup(as_user, src, dest):
+    pw = user(as_user)
+    src, dest = os.path.abspath(src), os.path.abspath(dest)
+    root_dir(os.path.dirname(dest))
+    r, w = os.pipe()
+    pid = _spawn(pw, lambda: _read_db(src, w), keep=(w,))   # started before root opens DEST: holds no fd of root's
+    os.close(w)
+    ok = False
+    fd = None
+    try:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        _copy_fd(r, fd)
+        os.close(r)
+        r = None
+        code, pid = _wait(pid), None
+        if code:
+            raise Fail(f"{src}: no copy (see above)", code)
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+        ok = True
+    finally:
+        if r is not None:
+            os.close(r)
+        if pid is not None:
+            os.waitpid(pid, 0)
+        if fd is not None:
+            os.close(fd)
+            if not ok:
+                os.unlink(dest)
+    return dest
+
+
+# --- restore: root's backup → the user's directory ------------------------------------------------------------------
+def _write_db(fd, dest):
+    """In the child (as the owner): dest becomes a copy of fd, atomically; its journal files go first."""
+    tmp = f"{dest}.restore-{os.getpid()}"
+    out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        _copy_fd(fd, out)
+        os.fchmod(out, 0o600)
+        os.fsync(out)
+    except BaseException:
+        os.close(out)
+        os.unlink(tmp)
+        raise
+    os.close(out)
+    for sfx in ("-wal", "-shm", "-journal"):
+        try:
+            os.unlink(dest + sfx)   # unlink removes a planted link itself, never its target
+        except FileNotFoundError:
+            pass
+    os.replace(tmp, dest)       # replaces a planted symlink at dest, never writes through it
+
+
+def restore(as_user, src, dest):
+    pw = user(as_user)
+    src, dest = os.path.abspath(src), os.path.abspath(dest)
+    root_dir(os.path.dirname(src))
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+            raise Fail(f"{src}: not root's own regular file — refused")
+        code = _wait(_spawn(pw, lambda: _write_db(fd, dest), keep=(fd,)))
+        if code:
+            raise Fail(f"{dest}: not restored (see above)", code)
+    finally:
+        os.close(fd)
+    return dest
+
+
+# --- the backup tree ------------------------------------------------------------------------------------------------
+def _drop(path):
+    """Remove path (inside root's tree) without following anything: a link is unlinked, a directory removed with the
+    fd-based (symlink-safe) rmtree."""
+    st = os.lstat(path)
+    if stat.S_ISDIR(st.st_mode):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+
+
+def adopt(old, root):
+    """Move old-layout backups (old: a path inside a directory another user controls) into root's tree."""
+    root = root_dir(root)
+    try:
+        os.lstat(old)
+    except FileNotFoundError:
+        return []
+    q = os.path.join(root, f".adopt-{os.getpid()}")
+    try:
+        os.rename(old, q)   # a rename never follows a link: whatever sits at OLD comes along as it is
+    except OSError as e:
+        raise Fail(f"{old}: could not move it out of the way ({e.strerror}) — left in place, not used") from None
+    moved = []
+    try:
+        st = os.lstat(q)
+        if (stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
+                or st.st_mode & 0o022):
+            print(f"lab-dbcopy: {old} was not root's own directory — dropped, nothing adopted", file=sys.stderr)
+            return moved
+        for e in sorted(os.scandir(q), key=lambda e: e.name):
+            est = e.stat(follow_symlinks=False)
+            if (not RELEASE_RE.match(e.name) or not stat.S_ISDIR(est.st_mode) or est.st_uid != os.geteuid()
+                    or est.st_mode & 0o022 or os.path.lexists(os.path.join(root, e.name))):
+                print(f"lab-dbcopy: {old}/{e.name}: not adopted", file=sys.stderr)
+                continue
+            # q now sits inside root's 0700 tree and e is root's own directory: nobody else can change what is in
+            # it any more, so what lstat says stays true. Only root's own regular, singly-linked files come along.
+            for f in os.scandir(e.path):
+                fst = f.stat(follow_symlinks=False)
+                if not stat.S_ISREG(fst.st_mode) or fst.st_uid != os.geteuid() or fst.st_nlink != 1:
+                    _drop(f.path)
+                else:
+                    os.chmod(f.path, 0o600)
+            os.chmod(e.path, 0o700)
+            os.rename(e.path, os.path.join(root, e.name))
+            moved.append(e.name)
+    finally:
+        if os.path.lexists(q):
+            _drop(q)
+    return moved
+
+
+def prune(root, keep_releases=KEEP_RELEASES, keep_rollbacks=KEEP_ROLLBACKS):
+    root = root_dir(root)
+    rels, rbs = [], []
+    for e in os.scandir(root):
+        if RELEASE_RE.match(e.name):
+            rels.append(e.name)
+        elif ROLLBACK_RE.match(e.name):
+            rbs.append(e.name)
+        elif e.name.startswith(".adopt-"):
+            _drop(e.path)
+    gone = sorted(rels)[:-keep_releases or None] if len(rels) > keep_releases else []
+    gone += sorted(rbs)[:-keep_rollbacks or None] if len(rbs) > keep_rollbacks else []
+    for name in gone:
+        _drop(os.path.join(root, name))
+    return gone
+
+
+def main(argv):
+    try:
+        if len(argv) == 5 and argv[0] in ("backup", "restore") and argv[1] == "--as":
+            (backup if argv[0] == "backup" else restore)(argv[2], argv[3], argv[4])
+            return 0
+        if len(argv) == 3 and argv[0] == "adopt":
+            for name in adopt(argv[1], argv[2]):
+                print(f"adopted backup {name}")
+            return 0
+        if len(argv) == 2 and argv[0] == "prune":
+            for name in prune(argv[1]):
+                print(f"removed old backup {name}")
+            return 0
+    except Fail as e:
+        print(f"lab-dbcopy: {e}", file=sys.stderr)
+        return e.code
+    except OSError as e:
+        print(f"lab-dbcopy: {e}", file=sys.stderr)
+        return 1
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

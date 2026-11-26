@@ -1,0 +1,140 @@
+{
+  "manifest": 2,
+  "id": "jellyfin",
+  "name": "Jellyfin",
+  "version": "2.0.0",
+  "kind": "community",
+  "category": "media",
+  "icon": "play",
+  "description": "Jellyfin, managed fully from lab with an API key: libraries (folders, options, scans), items (browse, metadata, identify, refresh, delete), live sessions and devices (message, stop, sign out; nothing is stored), activity log, users, scheduled tasks and triggers, plugins and catalog, transcoding, logs, storage, restart. User changes, plugin repositories, shutdown and API keys are owner only (admins ask).",
+  "requires": [{"id": "authentik", "optional": true}],
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Server URL",
+        "required": true,
+        "placeholder": "http://jellyfin:8096"
+      },
+      {
+        "key": "token",
+        "type": "secret",
+        "label": "API key",
+        "required": true,
+        "help": "Jellyfin Dashboard → Advanced → API Keys → add a key (for example named 'lab'). It acts as an administrator."
+      }
+    ],
+    "validate": {
+      "method": "GET",
+      "path": "/System/Info",
+      "expect": [
+        200
+      ]
+    }
+  },
+  "backend": {
+    "url": "{url}",
+    "health": "/health",
+    "timeout": 30,
+    "auth": {
+      "type": "header",
+      "name": "Authorization",
+      "prefix": "MediaBrowser Token=",
+      "secret": "token"
+    }
+  },
+  "access": {"roles": ["owner", "admin"], "groups": []},
+  "routes": [
+    {"method": "GET", "path": "/System/Info"},
+    {"method": "GET", "path": "/System/Info/Storage"},
+    {"method": "GET", "path": "/System/Logs"},
+    {"method": "GET", "path": "/System/Logs/Log"},
+    {"method": "GET", "path": "/System/ActivityLog/Entries"},
+    {"method": "GET", "path": "/System/Configuration/encoding"},
+    {"method": "GET", "path": "/Library/VirtualFolders"},
+    {"method": "GET", "path": "/Libraries/AvailableOptions"},
+    {"method": "GET", "path": "/Environment/DirectoryContents"},
+    {"method": "GET", "path": "/Localization/ParentalRatings"},
+    {"method": "GET", "path": "/Localization/Cultures"},
+    {"method": "GET", "path": "/Localization/Countries"},
+    {"method": "GET", "path": "/Items/Counts"},
+    {"method": "GET", "path": "/Items"},
+    {"method": "GET", "path": "/Sessions"},
+    {"method": "GET", "path": "/Devices"},
+    {"method": "GET", "path": "/ScheduledTasks"},
+    {"method": "GET", "path": "/Users"},
+    {"method": "GET", "path": "/Plugins"},
+    {"method": "GET", "path": "/Packages"},
+    {"method": "GET", "path": "/Repositories"},
+    {"method": "GET", "path": "/Auth/Keys", "owner_only": true, "secret": true, "label": "jellyfin: read API keys"},
+    {"method": "POST", "path": "/Library/Refresh", "min": "admin", "query_keys": [], "label": "jellyfin: scan all libraries"},
+    {"method": "POST", "path": "/Items/*/Refresh", "min": "admin", "query_keys": ["metadataRefreshMode", "imageRefreshMode", "replaceAllMetadata", "replaceAllImages", "regenerateTrickplay"], "label": "jellyfin: scan / refresh metadata"},
+    {"method": "POST", "path": "/Library/VirtualFolders", "min": "admin", "query_keys": ["name", "collectionType", "paths", "refreshLibrary"], "body_keys": ["LibraryOptions"], "label": "jellyfin: add library"},
+    {"method": "DELETE", "path": "/Library/VirtualFolders", "min": "admin", "query_keys": ["name", "refreshLibrary"], "label": "jellyfin: remove library (files stay)"},
+    {"method": "POST", "path": "/Library/VirtualFolders/Name", "min": "admin", "query_keys": ["name", "newName", "refreshLibrary"], "label": "jellyfin: rename library"},
+    {"method": "POST", "path": "/Library/VirtualFolders/Paths", "min": "admin", "query_keys": ["refreshLibrary"], "body_keys": ["Name", "Path", "PathInfo"], "label": "jellyfin: add library folder"},
+    {"method": "DELETE", "path": "/Library/VirtualFolders/Paths", "min": "admin", "query_keys": ["name", "path", "refreshLibrary"], "label": "jellyfin: remove library folder"},
+    {"method": "POST", "path": "/Library/VirtualFolders/LibraryOptions", "min": "admin", "query_keys": [], "body_keys": ["Id", "LibraryOptions"], "label": "jellyfin: library options"},
+    {"method": "POST", "path": "/Items/RemoteSearch/Movie", "min": "admin", "query_keys": [], "body_keys": ["SearchInfo", "ItemId", "SearchProviderName", "IncludeDisabledProviders"], "label": "jellyfin: identify (search movie)", "audit": false},
+    {"method": "POST", "path": "/Items/RemoteSearch/Series", "min": "admin", "query_keys": [], "body_keys": ["SearchInfo", "ItemId", "SearchProviderName", "IncludeDisabledProviders"], "label": "jellyfin: identify (search series)", "audit": false},
+    {"method": "POST", "path": "/Items/RemoteSearch/Apply/*", "min": "admin", "query_keys": ["replaceAllImages"], "body_keys": ["Name", "ProviderIds", "ProductionYear", "IndexNumber", "IndexNumberEnd", "ParentIndexNumber", "PremiereDate", "ImageUrl", "SearchProviderName", "Overview", "AlbumArtist", "Artists"], "label": "jellyfin: identify (apply match)"},
+    {"method": "POST", "path": "/Items/*", "min": "admin", "query_keys": [], "body_keys": ["Id", "Name", "OriginalTitle", "ForcedSortName", "CommunityRating", "CriticRating", "IndexNumber", "AirsBeforeSeasonNumber", "AirsAfterSeasonNumber", "AirsBeforeEpisodeNumber", "ParentIndexNumber", "DisplayOrder", "Album", "AlbumArtists", "ArtistItems", "Overview", "Status", "AirDays", "AirTime", "Genres", "Tags", "Studios", "PremiereDate", "DateCreated", "EndDate", "ProductionYear", "Height", "AspectRatio", "Video3DFormat", "OfficialRating", "CustomRating", "People", "LockData", "LockedFields", "ProviderIds", "PreferredMetadataLanguage", "PreferredMetadataCountryCode", "Taglines"], "label": "jellyfin: edit item metadata"},
+    {"method": "DELETE", "path": "/Items/*", "min": "admin", "query_keys": [], "label": "jellyfin: DELETE item + its files"},
+    {"method": "POST", "path": "/Sessions/*/Message", "min": "admin", "query_keys": [], "body_keys": ["Header", "Text", "TimeoutMs"], "label": "jellyfin: message a session"},
+    {"method": "POST", "path": "/Sessions/*/Playing/Stop", "min": "admin", "query_keys": [], "label": "jellyfin: stop playback"},
+    {"method": "POST", "path": "/Sessions/*/Playing/Pause", "min": "admin", "query_keys": [], "label": "jellyfin: pause playback"},
+    {"method": "POST", "path": "/Sessions/*/Playing/Unpause", "min": "admin", "query_keys": [], "label": "jellyfin: unpause playback"},
+    {"method": "DELETE", "path": "/Devices", "min": "admin", "query_keys": ["id"], "label": "jellyfin: sign out + forget device"},
+    {"method": "POST", "path": "/Users/New", "owner_only": true, "query_keys": [], "body_keys": ["Name", "Password"], "label": "jellyfin: create user"},
+    {"method": "POST", "path": "/Users/*/Policy", "owner_only": true, "query_keys": [], "body_keys": ["IsAdministrator", "IsHidden", "EnableCollectionManagement", "EnableSubtitleManagement", "EnableLyricManagement", "IsDisabled", "MaxParentalRating", "MaxParentalSubRating", "BlockedTags", "AllowedTags", "EnableUserPreferenceAccess", "AccessSchedules", "BlockUnratedItems", "EnableRemoteControlOfOtherUsers", "EnableSharedDeviceControl", "EnableRemoteAccess", "EnableLiveTvManagement", "EnableLiveTvAccess", "EnableMediaPlayback", "EnableAudioPlaybackTranscoding", "EnableVideoPlaybackTranscoding", "EnablePlaybackRemuxing", "ForceRemoteSourceTranscoding", "EnableContentDeletion", "EnableContentDeletionFromFolders", "EnableContentDownloading", "EnableSyncTranscoding", "EnableMediaConversion", "EnabledDevices", "EnableAllDevices", "EnabledChannels", "EnableAllChannels", "EnabledFolders", "EnableAllFolders", "InvalidLoginAttemptCount", "LoginAttemptsBeforeLockout", "MaxActiveSessions", "EnablePublicSharing", "BlockedMediaFolders", "BlockedChannels", "RemoteClientBitrateLimit", "AuthenticationProviderId", "PasswordResetProviderId", "SyncPlayAccess"], "label": "jellyfin: change user access (enable/disable, admin, libraries, rating, sessions, bitrate)"},
+    {"method": "POST", "path": "/Users/Password", "owner_only": true, "query_keys": ["userId"], "body_keys": ["NewPw", "ResetPassword"], "label": "jellyfin: set user password"},
+    {"method": "DELETE", "path": "/Users/*", "owner_only": true, "query_keys": [], "label": "jellyfin: delete user"},
+    {"method": "POST", "path": "/ScheduledTasks/Running/*", "min": "admin", "query_keys": [], "label": "jellyfin: run scheduled task"},
+    {"method": "DELETE", "path": "/ScheduledTasks/Running/*", "min": "admin", "query_keys": [], "label": "jellyfin: stop scheduled task"},
+    {"method": "POST", "path": "/ScheduledTasks/*/Triggers", "min": "admin", "query_keys": [], "body_list": true, "body_keys": ["Type", "TimeOfDayTicks", "IntervalTicks", "DayOfWeek", "MaxRuntimeTicks"], "body_allow": {"Type": ["DailyTrigger", "WeeklyTrigger", "IntervalTrigger", "StartupTrigger"]}, "label": "jellyfin: scheduled task triggers"},
+    {"method": "POST", "path": "/Plugins/*/*/Enable", "min": "admin", "query_keys": [], "label": "jellyfin: enable plugin"},
+    {"method": "POST", "path": "/Plugins/*/*/Disable", "min": "admin", "query_keys": [], "label": "jellyfin: disable plugin"},
+    {"method": "DELETE", "path": "/Plugins/*/*", "min": "admin", "query_keys": [], "label": "jellyfin: uninstall plugin"},
+    {"method": "POST", "path": "/Packages/Installed/*", "min": "admin", "query_keys": ["assemblyGuid", "version"], "label": "jellyfin: install / update plugin (from the configured repositories)"},
+    {"method": "DELETE", "path": "/Packages/Installing/*", "min": "admin", "query_keys": [], "label": "jellyfin: cancel plugin install"},
+    {"method": "POST", "path": "/Repositories", "owner_only": true, "query_keys": [], "body_list": true, "body_keys": ["Name", "Url", "Enabled"], "label": "jellyfin: plugin repositories (code source)"},
+    {"method": "POST", "path": "/System/Configuration/encoding", "min": "admin", "query_keys": [], "body_keys": ["EncodingThreadCount", "TranscodingTempPath", "FallbackFontPath", "EnableFallbackFont", "EnableAudioVbr", "DownMixAudioBoost", "DownMixStereoAlgorithm", "MaxMuxingQueueSize", "EnableThrottling", "ThrottleDelaySeconds", "EnableSegmentDeletion", "SegmentKeepSeconds", "HardwareAccelerationType", "EncoderAppPathDisplay", "VaapiDevice", "QsvDevice", "EnableTonemapping", "EnableVppTonemapping", "EnableVideoToolboxTonemapping", "TonemappingAlgorithm", "TonemappingMode", "TonemappingRange", "TonemappingDesat", "TonemappingPeak", "TonemappingParam", "VppTonemappingBrightness", "VppTonemappingContrast", "H264Crf", "H265Crf", "EncoderPreset", "DeinterlaceDoubleRate", "DeinterlaceMethod", "EnableDecodingColorDepth10Hevc", "EnableDecodingColorDepth10Vp9", "EnableDecodingColorDepth10HevcRext", "EnableDecodingColorDepth12HevcRext", "EnableEnhancedNvdecDecoder", "PreferSystemNativeHwDecoder", "EnableIntelLowPowerH264HwEncoder", "EnableIntelLowPowerHevcHwEncoder", "EnableHardwareEncoding", "AllowHevcEncoding", "AllowAv1Encoding", "EnableSubtitleExtraction", "SubtitleExtractionTimeoutMinutes", "HardwareDecodingCodecs", "AllowOnDemandMetadataBasedKeyframeExtractionForExtensions", "HlsAudioSeekStrategy"], "label": "jellyfin: transcoding settings"},
+    {"method": "POST", "path": "/System/Restart", "min": "admin", "query_keys": [], "label": "jellyfin: RESTART server"},
+    {"method": "POST", "path": "/System/Shutdown", "owner_only": true, "query_keys": [], "label": "jellyfin: SHUT DOWN server"},
+    {"method": "POST", "path": "/Auth/Keys", "owner_only": true, "secret": true, "query_keys": ["app"], "label": "jellyfin: create API key"},
+    {"method": "DELETE", "path": "/Auth/Keys/*", "owner_only": true, "secret": true, "query_keys": [], "label": "jellyfin: revoke API key"}
+  ],
+  "settings": [
+    {
+      "key": "host",
+      "type": "text",
+      "default": "",
+      "label": "machine object Jellyfin runs on",
+      "help": "The lab object id of the host (for example the media server); the Jellyfin service is shown under it. Empty = no parent."
+    },
+    {
+      "key": "user_links",
+      "type": "list",
+      "default": [],
+      "label": "Authentik user = Jellyfin user",
+      "help": "authentik=jellyfin pairs where the names differ; equal names link by themselves"
+    },
+    {
+      "key": "failed_login_alert",
+      "type": "int",
+      "default": 1,
+      "min": 0,
+      "max": 100,
+      "label": "alert at N failed logins (24 h)",
+      "help": "0 = never"
+    },
+    {
+      "key": "ticker_activity",
+      "type": "bool",
+      "default": true,
+      "label": "activity log in the ticker",
+      "help": "sign-ins, new users, failures (playback is shown live already)"
+    }
+  ]
+}

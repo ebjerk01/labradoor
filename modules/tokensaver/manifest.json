@@ -1,0 +1,26 @@
+{
+  "manifest": 2,
+  "id": "tokensaver",
+  "name": "tokenSaver",
+  "version": "0.1.0",
+  "kind": "community",
+  "category": "tools",
+  "icon": "node",
+  "description": "tokenSaver plugin savings on workstation's Claude Code sessions.",
+  "config": {
+    "fields": [
+      { "key": "url", "type": "url", "label": "Stats endpoint URL", "required": true, "default": "http://192.0.2.53:8124", "placeholder": "http://host:8124" },
+      { "key": "api_key", "type": "secret", "label": "X-Api-Key token", "required": true, "help": "/opt/tokensaver-stats/.token on workstation" }
+    ],
+    "validate": { "method": "GET", "path": "/api/status", "expect": [200] }
+  },
+  "backend": {
+    "url": "{url}", "health": "/api/status", "timeout": 20,
+    "auth": { "type": "header", "name": "X-Api-Key", "secret": "api_key" }
+  },
+  "access": { "roles": ["owner", "admin"], "groups": [] },
+  "routes": [
+    { "method": "GET", "path": "/api/status" },
+    { "method": "GET", "path": "/api/stats" }
+  ]
+}

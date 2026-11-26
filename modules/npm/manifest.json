@@ -1,0 +1,169 @@
+{
+  "manifest": 2,
+  "id": "npm",
+  "name": "NPMplus",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "network",
+  "icon": "proxy",
+  "description": "Reverse proxy (NPMplus / Nginx Proxy Manager): proxy hosts, certificates, access lists, redirections and 404 hosts. Through the lab connector `npm` (session login lives there; its NPM user is not an admin).",
+  "requires": [
+    {
+      "id": "unifi",
+      "optional": true
+    },
+    {
+      "id": "drift",
+      "optional": true
+    }
+  ],
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "NPMplus admin URL",
+        "required": true,
+        "placeholder": "https://npm.example.lan:81",
+        "help": "the admin UI; the API is <url>/api"
+      },
+      {
+        "key": "username",
+        "type": "text",
+        "label": "Login e-mail",
+        "required": true,
+        "help": "a dedicated NPM user (not an admin) with the permissions lab should have"
+      },
+      {
+        "key": "password",
+        "type": "secret",
+        "label": "Password",
+        "required": true
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true,
+        "help": "turn off only for a self-signed certificate on your own network"
+      }
+    ],
+    "validate": {
+      "method": "POST",
+      "path": "/api/_validate"
+    }
+  },
+  "backend": {
+    "url": "http://127.0.0.1:8110",
+    "health": "/healthz",
+    "timeout": 30
+  },
+  "connector": {},
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/overview"
+    },
+    {
+      "method": "POST",
+      "path": "/api/hosts",
+      "min": "admin",
+      "label": "create proxy host"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/hosts/*",
+      "min": "admin",
+      "label": "edit proxy host"
+    },
+    {
+      "method": "POST",
+      "path": "/api/hosts/*/enable",
+      "min": "admin",
+      "label": "enable proxy host"
+    },
+    {
+      "method": "POST",
+      "path": "/api/hosts/*/disable",
+      "min": "admin",
+      "label": "disable proxy host"
+    },
+    {
+      "method": "POST",
+      "path": "/api/redirections/*/enable",
+      "min": "admin",
+      "label": "enable redirection"
+    },
+    {
+      "method": "POST",
+      "path": "/api/redirections/*/disable",
+      "min": "admin",
+      "label": "disable redirection"
+    },
+    {
+      "method": "POST",
+      "path": "/api/dead-hosts/*/enable",
+      "min": "admin",
+      "label": "enable 404 host"
+    },
+    {
+      "method": "POST",
+      "path": "/api/dead-hosts/*/disable",
+      "min": "admin",
+      "label": "disable 404 host"
+    },
+    {
+      "method": "POST",
+      "path": "/api/certificates/*/renew",
+      "min": "admin",
+      "label": "renew certificate"
+    },
+    {
+      "method": "GET",
+      "path": "/api/hosts/*/advanced",
+      "owner_only": true,
+      "secret": true,
+      "label": "read raw nginx config (unredacted: may hold credentials)"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/hosts/*/advanced",
+      "owner_only": true,
+      "label": "edit raw nginx config / auth gate"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/hosts/*",
+      "owner_only": true,
+      "label": "delete proxy host"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/redirections/*",
+      "owner_only": true,
+      "label": "delete redirection"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/dead-hosts/*",
+      "owner_only": true,
+      "label": "delete 404 host"
+    }
+  ],
+  "settings": [
+    {
+      "key": "machine",
+      "type": "text",
+      "default": "",
+      "label": "proxy machine object",
+      "help": "The lab object id of the machine NPMplus runs on (e.g. its container name), so cert alerts and the proxy summary attach to it."
+    }
+  ]
+}

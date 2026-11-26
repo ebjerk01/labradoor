@@ -1,0 +1,160 @@
+{
+  "manifest": 2,
+  "id": "unifi",
+  "name": "UniFi",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "network",
+  "icon": "router",
+  "description": "UniFi Network (router/UCG console): clients, DHCP reservations, devices, networks/VLANs, port forwards; block a client, restart an access point. Through the lab connector `unifi` (cookie login lives there).",
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "UniFi console URL",
+        "required": true,
+        "placeholder": "https://192.168.1.1"
+      },
+      {
+        "key": "username",
+        "type": "text",
+        "label": "Username",
+        "required": true,
+        "help": "a local console account (Site Admin is enough)"
+      },
+      {
+        "key": "password",
+        "type": "secret",
+        "label": "Password",
+        "required": true
+      },
+      {
+        "key": "site",
+        "type": "text",
+        "label": "Site",
+        "default": "default",
+        "help": "the Network app's site name (default)"
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true,
+        "help": "turn off only for a self-signed certificate on your own network"
+      }
+    ],
+    "validate": {
+      "method": "POST",
+      "path": "/api/_validate"
+    }
+  },
+  "backend": {
+    "url": "http://127.0.0.1:8111",
+    "health": "/healthz",
+    "timeout": 30
+  },
+  "connector": {},
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/portforwards"
+    },
+    {
+      "method": "POST",
+      "path": "/api/reservations",
+      "min": "admin",
+      "label": "add DHCP reservation",
+      "body_keys": [
+        "mac",
+        "ip",
+        "name",
+        "networkId"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/reservations/*",
+      "min": "admin",
+      "label": "change DHCP reservation",
+      "body_keys": [
+        "ip",
+        "name",
+        "networkId"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/clients/*/name",
+      "min": "admin",
+      "label": "rename UniFi client",
+      "body_keys": [
+        "name"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/clients/*/block",
+      "min": "admin",
+      "label": "block client"
+    },
+    {
+      "method": "POST",
+      "path": "/api/clients/*/unblock",
+      "min": "admin",
+      "label": "unblock client"
+    },
+    {
+      "method": "POST",
+      "path": "/api/devices/*/restart",
+      "min": "admin",
+      "label": "restart access point"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/reservations/*",
+      "owner_only": true,
+      "label": "remove DHCP reservation"
+    },
+    {
+      "method": "POST",
+      "path": "/api/portforwards",
+      "owner_only": true,
+      "label": "add port forward",
+      "body_keys": [
+        "name",
+        "proto",
+        "dstPort",
+        "fwdPort",
+        "fwdIp",
+        "enabled"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/portforwards/*",
+      "owner_only": true,
+      "label": "remove port forward"
+    }
+  ],
+  "settings": [
+    {
+      "key": "gateway",
+      "type": "text",
+      "default": "",
+      "label": "gateway object",
+      "help": "The lab object id of the topology node that stands for the UniFi gateway, so WAN health and the network list show on it."
+    }
+  ]
+}

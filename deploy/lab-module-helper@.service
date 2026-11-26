@@ -1,0 +1,14 @@
+[Unit]
+Description=Labradoor module helper (one request: catalog-check, stage, install, update, rollback, remove or status)
+
+[Service]
+ExecStart=/usr/local/sbin/lab-module-helper
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+# LAB_UPDATE_ALLOW_HTTP=1 here allows a plain http:// catalog on the LAN (testing only; the same switch as core updates)
+EnvironmentFile=-/etc/lab/update.env
+RuntimeMaxSec=900
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes

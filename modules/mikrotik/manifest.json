@@ -1,0 +1,52 @@
+{
+  "manifest": 2,
+  "id": "mikrotik",
+  "name": "MikroTik switch",
+  "version": "1.0.0",
+  "kind": "community",
+  "category": "network",
+  "icon": "switch",
+  "description": "A MikroTik RouterOS switch or router: ports (status, speed, traffic, errors, PoE), VLANs, system health, port enable/disable and PoE power-cycle.",
+  "config": {
+    "fields": [
+      { "key": "url", "type": "url", "label": "Device URL", "required": true, "placeholder": "http://switch.lan",
+        "help": "RouterOS 7 REST API: the device's address with http:// (www service) or https:// (www-ssl with a certificate). The module appends /rest." },
+      { "key": "username", "type": "text", "label": "Username", "required": true, "default": "lab" },
+      { "key": "password", "type": "secret", "label": "Password", "required": true,
+        "help": "A dedicated RouterOS user in a group with only: read, write, api, rest-api (no ftp, ssh, policy, sensitive, password, reboot). Restrict its address to the lab gateway." },
+      { "key": "verify_tls", "type": "bool", "label": "Verify TLS certificate", "default": true }
+    ],
+    "validate": { "method": "GET", "path": "/system/identity", "expect": [200] }
+  },
+  "backend": {
+    "url": "{url}/rest", "health": "/system/identity", "timeout": 15, "tls_verify": "{verify_tls}",
+    "auth": { "type": "basic", "username": "username", "secret": "password" }
+  },
+  "access": { "roles": ["owner", "admin"], "groups": [] },
+  "routes": [
+    { "method": "GET", "path": "/system/identity" },
+    { "method": "GET", "path": "/system/resource" },
+    { "method": "GET", "path": "/system/health" },
+    { "method": "GET", "path": "/interface", "query_keys": [".proplist"] },
+    { "method": "GET", "path": "/interface/ethernet", "query_keys": [".proplist"] },
+    { "method": "GET", "path": "/interface/ethernet/poe", "query_keys": [".proplist"] },
+    { "method": "GET", "path": "/interface/bridge/vlan", "query_keys": [".proplist"] },
+    { "method": "GET", "path": "/interface/bridge/port", "query_keys": [".proplist"] },
+    { "method": "POST", "path": "/interface/ethernet/monitor", "min": "admin", "audit": false, "label": "read port link status",
+      "body_keys": ["numbers", "once"], "max_body": 2000 },
+    { "method": "POST", "path": "/interface/ethernet/poe/monitor", "min": "admin", "audit": false, "label": "read PoE status",
+      "body_keys": ["numbers", "once"], "max_body": 2000 },
+    { "method": "PATCH", "path": "/interface/ethernet/*", "min": "admin", "label": "enable or disable a switch port",
+      "body_keys": ["disabled"], "body_allow": { "disabled": ["true", "false"] }, "max_body": 200 },
+    { "method": "POST", "path": "/interface/ethernet/poe/power-cycle", "min": "admin", "label": "power-cycle a PoE port",
+      "body_keys": ["numbers", "duration"], "body_allow": { "duration": ["5s", "10s", "30s"] }, "max_body": 300 }
+  ],
+  "settings": [
+    { "key": "object_id", "type": "text", "default": "", "label": "object id of the switch",
+      "help": "Use another module's object id (e.g. the one Driftsstatus uses) to merge this switch into it. Blank = the device's identity name." },
+    { "key": "temp_warn", "type": "int", "default": 70, "min": 40, "max": 110, "label": "CPU temperature warning (°C)" },
+    { "key": "slow_warn", "type": "bool", "default": true, "label": "warn when a port links below 1 Gbit/s",
+      "help": "Catches bad cables; list known slow ports in the next setting." },
+    { "key": "ignore_ports", "type": "list", "default": [], "label": "ports to leave out of alerts", "help": "e.g. ether2 for a known 100 Mbit device." }
+  ]
+}

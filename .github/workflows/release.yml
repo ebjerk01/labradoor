@@ -1,0 +1,65 @@
+name: Release
+
+# Tag a commit `vX.Y.Z` to build a signed release and attach it to a GitHub Release, which doubles as the
+# distribution point: point an installation's LAB_RELEASE_INDEX at the index.json asset.
+#
+# Repository secrets (set these to enable automated releases):
+#   LAB_RELEASE_KEY            base64 of the OpenSSH private signing key (its public half is deploy/release.pub)
+#   LAB_RELEASE_KEY_PASS_CMD   optional: a shell command that prints the key's passphrase (only if the key is encrypted)
+# Without LAB_RELEASE_KEY the job skips cleanly (a maintainer can still publish a release signed off-CI).
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      HAVE_KEY: ${{ secrets.LAB_RELEASE_KEY != '' }}
+    steps:
+      - name: Signing key configured?
+        run: |
+          if [ "$HAVE_KEY" != "true" ]; then
+            echo "::notice::No LAB_RELEASE_KEY secret set — skipping the CI release build for ${GITHUB_REF_NAME}."
+          fi
+      - uses: actions/checkout@v4
+        if: env.HAVE_KEY == 'true'
+      - uses: actions/setup-node@v4
+        if: env.HAVE_KEY == 'true'
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        if: env.HAVE_KEY == 'true'
+        with:
+          python-version: '3.12'
+      - name: Write signing key outside the working tree
+        if: env.HAVE_KEY == 'true'
+        env:
+          LAB_RELEASE_KEY_B64: ${{ secrets.LAB_RELEASE_KEY }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/signing-key"
+          printf '%s' "$LAB_RELEASE_KEY_B64" | base64 -d > "$RUNNER_TEMP/signing-key"
+      - name: Build signed release
+        if: env.HAVE_KEY == 'true'
+        env:
+          LAB_RELEASE_KEY_PASS_CMD: ${{ secrets.LAB_RELEASE_KEY_PASS_CMD }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          BASE="${{ github.server_url }}/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+          deploy/make-release.sh --out release-out --version "$V" --key "$RUNNER_TEMP/signing-key" \
+            --base-url "$BASE" --notes "Labradoor $V"
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/signing-key"
+      - name: Publish GitHub Release
+        if: env.HAVE_KEY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-out/* \
+            --title "Labradoor ${GITHUB_REF_NAME#v}" \
+            --notes "Signed release. Verify tarballs with deploy/release.pub; point an installation's LAB_RELEASE_INDEX at the index.json asset."

@@ -1,0 +1,16 @@
+# Labradoor gateway :8100 — installed as /etc/nftables.d-lab.nft only when that file is missing; then it belongs to the
+# host: narrow it to your reverse proxy and monitoring once they are set up, e.g.
+#     tcp dport 8100 ip saddr { 127.0.0.1, 192.0.2.10 } accept
+# Default: the local networks (private IPv4 ranges, IPv6 ULA + link-local) and the host itself; nothing from elsewhere.
+# Connectors listen on 127.0.0.1 already. SSH is not touched.
+table inet lab_gateway
+delete table inet lab_gateway
+table inet lab_gateway {
+  chain input {
+    type filter hook input priority 0; policy accept;
+    tcp dport 8100 iifname "lo" accept
+    tcp dport 8100 ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept
+    tcp dport 8100 ip6 saddr { fc00::/7, fe80::/10 } accept
+    tcp dport 8100 drop
+  }
+}

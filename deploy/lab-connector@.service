@@ -1,0 +1,35 @@
+[Unit]
+Description=Labradoor connector %i
+After=network-online.target lab.service
+Wants=network-online.target
+
+[Service]
+# its OWN user (made by the connector helper / install.sh): not in group lab, so not one key, env or database of the
+# gateway — and not another connector's state — is readable by it. Its config comes from the gateway (GET
+# /api/connector/config, signed with its key); its key comes from systemd (a private copy in $CREDENTIALS_DIRECTORY).
+User=lab-c-%i
+Group=lab-c-%i
+UMask=0077
+Environment=CONNECTOR_ID=%i
+LoadCredential=key:/etc/lab/keys/%i.key
+WorkingDirectory=/opt/lab/connectors/%i
+ExecStart=/usr/bin/python3 connector.py
+# state (databases, run logs) and ephemeral files (an ssh key it was given) — owned by its user, 0700
+StateDirectory=lab-connectors/%i
+StateDirectoryMode=0700
+RuntimeDirectory=lab-connectors/%i
+RuntimeDirectoryMode=0700
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadOnlyPaths=/opt/lab
+InaccessiblePaths=-/etc/lab -/var/lib/lab -/run/lab-connector-helper.sock -/run/lab-update-helper.sock -/run/lab-module-helper.sock
+
+[Install]
+WantedBy=multi-user.target

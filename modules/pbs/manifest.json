@@ -1,0 +1,201 @@
+{
+  "manifest": 2,
+  "id": "pbs",
+  "name": "Proxmox Backup Server",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "infrastructure",
+  "icon": "archive",
+  "description": "Proxmox Backup Server: datastore usage and growth estimate, GC/prune/verify/sync jobs, backups per guest (verify, protect, delete, restore commands).",
+  "requires": [
+    {
+      "id": "proxmox",
+      "optional": true
+    }
+  ],
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "PBS URL",
+        "required": true,
+        "placeholder": "https://pbs.example:8007"
+      },
+      {
+        "key": "token",
+        "type": "secret",
+        "label": "API token",
+        "required": true,
+        "help": "USER@REALM!TOKENID:SECRET (PBS format). A privilege-separated token with Audit on the system, DatastoreAdmin on the datastore and, to run an offsite push from lab, RemoteSyncPushOperator on the remote."
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true,
+        "help": "Off for PBS's own self-signed certificate."
+      }
+    ],
+    "validate": {
+      "method": "GET",
+      "path": "/version",
+      "expect": [
+        200
+      ]
+    }
+  },
+  "backend": {
+    "url": "{url}/api2/json",
+    "health": "/ping",
+    "timeout": 30,
+    "tls_verify": "{verify_tls}",
+    "auth": {
+      "type": "header",
+      "name": "Authorization",
+      "prefix": "PBSAPIToken=",
+      "secret": "token"
+    }
+  },
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/ping"
+    },
+    {
+      "method": "GET",
+      "path": "/version"
+    },
+    {
+      "method": "GET",
+      "path": "/status/datastore-usage"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/gc"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/prune"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/sync"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/datastore/{store}/groups"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/datastore/{store}/snapshots"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/datastore/{store}/rrd",
+      "query_keys": [
+        "timeframe",
+        "cf"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/localhost/status"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/localhost/tasks"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/localhost/tasks/*/status"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/localhost/tasks/*/log"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/sync/*/run",
+      "owner_only": true,
+      "label": "run PBS sync job (offsite push)"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/datastore/{store}/gc",
+      "min": "admin",
+      "label": "start PBS garbage collection"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/prune/*/run",
+      "min": "admin",
+      "label": "run PBS prune job"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/verify/*/run",
+      "min": "admin",
+      "label": "run PBS verify job"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/datastore/{store}/verify",
+      "min": "admin",
+      "label": "verify a backup"
+    },
+    {
+      "method": "PUT",
+      "path": "/admin/datastore/{store}/protected",
+      "min": "admin",
+      "label": "protect/unprotect a backup"
+    },
+    {
+      "method": "DELETE",
+      "path": "/admin/datastore/{store}/snapshots",
+      "min": "admin",
+      "label": "delete a backup snapshot"
+    }
+  ],
+  "settings": [
+    {
+      "key": "store",
+      "type": "text",
+      "default": "homelab",
+      "label": "datastore",
+      "help": "The PBS datastore lab shows and acts on (usage, groups, backups)."
+    },
+    {
+      "key": "host_object",
+      "type": "text",
+      "default": "",
+      "label": "host object",
+      "help": "The lab object id of the machine PBS runs on (the PBS object is listed under it)."
+    },
+    {
+      "key": "pve_storage",
+      "type": "text",
+      "default": "pbs",
+      "label": "Proxmox storage id",
+      "help": "The storage id this datastore has in Proxmox (Datacenter → Storage); used in the restore commands."
+    },
+    {
+      "key": "restore_storage",
+      "type": "text",
+      "default": "<storage>",
+      "label": "restore target storage",
+      "help": "What the restore commands show for --storage, e.g. local-lvm."
+    }
+  ]
+}

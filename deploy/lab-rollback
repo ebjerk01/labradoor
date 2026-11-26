@@ -1,0 +1,86 @@
+#!/bin/sh
+# lab-admin rollback [RELEASE] [--with-db]   (installed as /usr/local/sbin/lab-rollback by install.sh)
+#   no RELEASE      → the release before the live one
+#   --list          → show the releases (* = live)
+#   --with-db       → also restore the databases as they were just before the live release was installed
+#                     (needed when that release migrated the schema; everything since that deploy is lost)
+# Root-only for --with-db: the update helper refuses it from the gateway (security review 2026-11-15, H2).
+# The database backups live in /var/lib/lab-backups (root 0700). Root never copies, chmods or chowns anything inside
+# /var/lib/lab or /var/lib/lab-connectors itself: lab-dbcopy reads and writes there AS the database's owner.
+# The LAB_* variables below are for the tests only.
+set -eu
+REL_ROOT="${LAB_RELEASES:-/opt/lab-releases}"
+LIVE_LINK="${LAB_LIVE:-/opt/lab}"
+BK_ROOT="${LAB_BACKUPS:-/var/lib/lab-backups}"
+DATA="${LAB_DATA:-/var/lib/lab}"
+CDATA="${LAB_CONNECTOR_DATA:-/var/lib/lab-connectors}"
+LAB_USER="${LAB_USER:-lab}"
+AI_USER="${LAB_AI_USER:-lab-c-ai}"
+DBCOPY="${LAB_DBCOPY:-/usr/local/sbin/lab-dbcopy}"
+SYSTEMCTL="${LAB_SYSTEMCTL:-systemctl}"
+LOCK="${LAB_DEPLOY_LOCK:-/run/lab-deploy.lock}"
+LIVE="$(basename "$(readlink -f "$LIVE_LINK")")"
+TARGET="" WITH_DB=0
+# "0.1.0 abc1234" — releases before step 17 only have VERSION (= the commit)
+# (|| true: under set -e a missing COMMIT file would end the $(...) before anything is printed)
+_ver() { v="$(cat "$REL_ROOT/$1/VERSION" 2>/dev/null || true)"; c="$(cat "$REL_ROOT/$1/COMMIT" 2>/dev/null || true)"
+         if [ -n "$c" ]; then echo "$v $(echo "$c" | cut -c1-7)"; else echo "$v" | cut -c1-7; fi; }
+for a in "$@"; do
+  case "$a" in
+    --with-db) WITH_DB=1 ;;
+    --list) for r in $(ls -1 "$REL_ROOT" | sort); do
+              [ "$r" = "$LIVE" ] && m='*' || m=' '; echo "$m $r  $(_ver "$r")"; done; exit 0 ;;
+    -h|--help) sed -n '2,6p' "$0"; exit 0 ;;
+    *) TARGET="$a" ;;
+  esac
+done
+if [ -z "$TARGET" ]; then
+  TARGET="$(ls -1 "$REL_ROOT" | sort | grep -B1 -x "$LIVE" | head -n 1)"
+  [ "$TARGET" != "$LIVE" ] || { echo "no release before $LIVE"; exit 1; }
+fi
+case "$TARGET" in */*|.*) echo "not a release name: $TARGET"; exit 1 ;; esac
+[ -d "$REL_ROOT/$TARGET" ] || { echo "no such release: $TARGET (see --list)"; exit 1; }
+[ "$TARGET" != "$LIVE" ] || { echo "$TARGET is already live"; exit 0; }
+exec 9>"$LOCK"; flock -w 900 9   # never in the middle of a deploy
+echo "rolling back: $LIVE → $TARGET"
+UNITS="lab $($SYSTEMCTL list-units --plain --no-legend 'lab-connector@*' | awk '{print $1}')"
+# a real directory of root's (not a symlink, not writable by anyone else)
+_mine() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1")" = "$(id -u)" ] && [ -z "$(find "$1" -maxdepth 0 -perm /022)" ]; }
+if [ "$WITH_DB" = 1 ]; then
+  BK="$BK_ROOT/$LIVE"
+  _mine "$BK_ROOT" && _mine "$BK" || { echo "no usable database backup for $LIVE in $BK (missing, or not root's own directory)"; exit 1; }
+  $SYSTEMCTL stop $UNITS
+  # what is there now, in case the rollback was a mistake (as the owner, into root's tree)
+  SNAP="$BK_ROOT/rollback-$(date +%Y%m%d-%H%M%S)-from-$LIVE"
+  install -d -m 700 "$SNAP"
+  FAILED=""
+  for f in $(find -P "$BK" -mindepth 1 -maxdepth 1 -type f -name '*.sqlite3' -printf '%f\n' | sort); do
+    case "$f" in
+      lab.sqlite3) dst="$DATA/lab.sqlite3"; own="$LAB_USER" ;;
+      ai.sqlite3) dst="$CDATA/ai/ai.sqlite3"; own="$AI_USER" ;;   # connector state (since step 15)
+      *) continue ;;
+    esac
+    id "$own" >/dev/null 2>&1 || { echo "skipped $f: no user $own"; continue; }
+    rc=0; python3 -I "$DBCOPY" backup --as "$own" "$dst" "$SNAP/$f" || rc=$?
+    [ "$rc" = 0 ] && echo "saved the current $dst in $SNAP" || [ "$rc" = 3 ] || echo "WARNING: no copy of the current $dst"
+    if python3 -I "$DBCOPY" restore --as "$own" "$BK/$f" "$dst"; then
+      echo "restored $dst from $BK"
+    else
+      echo "FAILED to restore $dst"; FAILED="$FAILED $f"
+    fi
+  done
+  python3 -I "$DBCOPY" prune "$BK_ROOT" || true
+  case " $FAILED " in
+    *" lab.sqlite3 "*) echo "the gateway's database was not restored: staying on $LIVE"; $SYSTEMCTL start $UNITS; exit 1 ;;
+  esac
+fi
+ln -sfn "$REL_ROOT/$TARGET" "$LIVE_LINK.tmp" && mv -Tf "$LIVE_LINK.tmp" "$LIVE_LINK"
+$SYSTEMCTL restart lab
+# connectors: a module installed from a catalog runs its package's connector through a unit drop-in that follows
+# which copy is in use (bundled or installed), and the gateway re-points it on start. One restarted before that
+# fails once (its old directory is gone) and the gateway starts it again: not a reason to stop here.
+for u in ${UNITS#lab}; do $SYSTEMCTL restart "$u" || echo "$u: did not restart (the gateway starts it again)"; done
+sleep 1
+$SYSTEMCTL is-active lab && curl -fsS http://127.0.0.1:8100/healthz && echo
+echo "live: $TARGET ($(_ver "$TARGET"))"
+[ -z "${FAILED:-}" ] || { echo "NOT restored:$FAILED"; exit 1; }

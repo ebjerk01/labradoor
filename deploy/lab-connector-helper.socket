@@ -1,0 +1,13 @@
+[Unit]
+Description=Labradoor connector helper (socket; only the gateway's group may connect)
+
+[Socket]
+ListenStream=/run/lab-connector-helper.sock
+SocketUser=root
+SocketGroup=lab
+SocketMode=0660
+Accept=yes
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

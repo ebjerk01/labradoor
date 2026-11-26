@@ -1,0 +1,229 @@
+{
+  "manifest": 2,
+  "id": "ad",
+  "name": "Active Directory",
+  "version": "2.1.0",
+  "kind": "community",
+  "category": "identity",
+  "icon": "user",
+  "description": "Active Directory: users, groups, computers, OUs, lockouts and password expiry. Backend is the lab connector (connectors/ad) over LDAPS with a delegated service account; the domain, OUs and account names are set in the connector's env. Reading: admin. Every change: owner only (identity).",
+  "requires": [
+    {
+      "id": "authentik",
+      "optional": true
+    },
+    {
+      "id": "drift",
+      "optional": true
+    },
+    {
+      "id": "proxmox",
+      "optional": true
+    },
+    {
+      "id": "manage",
+      "optional": true
+    }
+  ],
+  "config": {
+    "fields": [
+      {
+        "key": "host",
+        "type": "text",
+        "label": "Domain controller",
+        "required": true,
+        "placeholder": "dc1.ad.example.com",
+        "help": "its name as on its LDAPS certificate"
+      },
+      {
+        "key": "address",
+        "type": "text",
+        "label": "Connect to",
+        "placeholder": "192.168.1.10",
+        "help": "optional: connect to this address, still verify the certificate for the name above"
+      },
+      {
+        "key": "port",
+        "type": "int",
+        "label": "LDAPS port",
+        "default": 636,
+        "min": 1,
+        "max": 65535
+      },
+      {
+        "key": "ca_cert",
+        "type": "text",
+        "multiline": true,
+        "label": "CA certificate (PEM)",
+        "help": "the CA that signed the DC's certificate (empty = the system's trusted CAs)"
+      },
+      {
+        "key": "bind_user",
+        "type": "text",
+        "label": "Service account",
+        "required": true,
+        "placeholder": "svc-lab@ad.example.com",
+        "help": "not a Domain Admin: delegate rights on one OU"
+      },
+      {
+        "key": "bind_password",
+        "type": "secret",
+        "label": "Password",
+        "required": true
+      },
+      {
+        "key": "base_dn",
+        "type": "text",
+        "label": "Base DN",
+        "required": true,
+        "placeholder": "DC=ad,DC=example,DC=com"
+      },
+      {
+        "key": "managed_ou",
+        "type": "text",
+        "label": "OU lab may change",
+        "required": true,
+        "placeholder": "OU=Lab,DC=ad,DC=example,DC=com",
+        "help": "lab only writes below this OU"
+      },
+      {
+        "key": "users_ou",
+        "type": "text",
+        "label": "Users OU",
+        "required": true,
+        "placeholder": "OU=Users,OU=Lab,DC=ad,DC=example,DC=com",
+        "help": "where lab creates users (inside the OU above)"
+      },
+      {
+        "key": "groups_ou",
+        "type": "text",
+        "label": "Groups OU",
+        "required": true,
+        "placeholder": "OU=Groups,OU=Lab,DC=ad,DC=example,DC=com",
+        "help": "groups whose members lab may change"
+      },
+      {
+        "key": "protected",
+        "type": "list",
+        "label": "Protected accounts",
+        "default": [],
+        "help": "sAMAccountNames lab may never disable or delete (your own account)"
+      }
+    ],
+    "validate": {
+      "method": "POST",
+      "path": "/api/_validate"
+    }
+  },
+  "backend": {
+    "url": "http://127.0.0.1:8115",
+    "health": "/healthz",
+    "timeout": 20
+  },
+  "connector": {},
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/directory"
+    },
+    {
+      "method": "GET",
+      "path": "/api/status"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users",
+      "owner_only": true,
+      "secret": true,
+      "label": "AD: create user"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/users/*",
+      "owner_only": true,
+      "label": "AD: edit user"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/users/*",
+      "owner_only": true,
+      "label": "AD: delete user"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/*/unlock",
+      "owner_only": true,
+      "label": "AD: unlock"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/*/enable",
+      "owner_only": true,
+      "label": "AD: enable user"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/*/disable",
+      "owner_only": true,
+      "label": "AD: disable user"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/*/password",
+      "owner_only": true,
+      "secret": true,
+      "label": "AD: reset password"
+    },
+    {
+      "method": "POST",
+      "path": "/api/users/*/groups/*",
+      "owner_only": true,
+      "label": "AD: add to group"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/users/*/groups/*",
+      "owner_only": true,
+      "label": "AD: remove from group"
+    }
+  ],
+  "settings": [
+    {
+      "key": "expiry_days",
+      "type": "int",
+      "default": 7,
+      "min": 1,
+      "max": 60,
+      "label": "password-expiry warning (days)",
+      "help": "enabled accounts whose AD password expires within this many days raise an alert"
+    },
+    {
+      "key": "builtin",
+      "type": "bool",
+      "default": false,
+      "label": "show built-in accounts/groups",
+      "help": "Administrator, Guest, krbtgt and the ~50 built-in groups in the Directory lists (alerts always cover every enabled account)"
+    },
+    {
+      "key": "authentik_source",
+      "type": "text",
+      "default": "",
+      "label": "Authentik LDAP source",
+      "help": "slug of the Authentik LDAP source that syncs this domain (shown in the Authentik notes of users and groups)"
+    },
+    {
+      "key": "computers_ou",
+      "type": "text",
+      "default": "",
+      "label": "OU for new domain joins",
+      "help": "where redircmp sends new computers, e.g. OU=Computers,DC=example,DC=com; leave empty if not set"
+    }
+  ]
+}

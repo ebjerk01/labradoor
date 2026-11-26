@@ -1,0 +1,24 @@
+[Unit]
+Description=Labradoor gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=lab
+Group=lab
+UMask=0077
+EnvironmentFile=/etc/lab/lab.env
+WorkingDirectory=/opt/lab/gateway
+ExecStart=/usr/bin/python3 -m lab
+Restart=always
+RestartSec=3
+LimitNOFILE=8192
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/lab
+ReadOnlyPaths=/etc/lab /opt/lab
+
+[Install]
+WantedBy=multi-user.target

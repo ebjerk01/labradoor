@@ -1,0 +1,10 @@
+# gitleaks configuration for Labradoor. Extends the default rules and allowlists the fake credentials that the
+# gateway's log-redaction test feeds in on purpose (tests/test_gateway_delegation.py exercises redact.text()).
+title = "Labradoor"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake secrets fed into the gateway log-redaction test (redact.text())"
+paths = ['''test_gateway_delegation\.py''']

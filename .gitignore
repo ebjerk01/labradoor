@@ -1,0 +1,10 @@
+node_modules/
+ui/dist/
+__pycache__/
+*.pyc
+graphify-out/
+.claude/
+release-out/
+module-out/
+public-out/
+public-out.report.json

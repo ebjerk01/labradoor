@@ -1,0 +1,1 @@
+"""Labradoor gateway."""

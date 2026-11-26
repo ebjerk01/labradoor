@@ -1,0 +1,172 @@
+{
+  "manifest": 2,
+  "id": "authentik",
+  "name": "Authentik",
+  "version": "2.0.0",
+  "kind": "community",
+  "category": "identity",
+  "icon": "shield",
+  "description": "Users, groups and app access in Authentik. Reading: admin. Every change: owner only (identity).",
+  "config": {
+    "fields": [
+      {
+        "key": "url",
+        "type": "url",
+        "label": "Authentik URL",
+        "required": true,
+        "placeholder": "http://authentik.example:9000",
+        "help": "Where the gateway reaches Authentik (the server's own port, not the public SSO address, is fine)."
+      },
+      {
+        "key": "token",
+        "type": "secret",
+        "label": "API token",
+        "required": true,
+        "help": "Token of a dedicated service account with an RBAC role that may view users, groups, applications, providers, policy bindings and events, and change users, groups and bindings. Not a superuser."
+      },
+      {
+        "key": "verify_tls",
+        "type": "bool",
+        "label": "Verify TLS certificate",
+        "default": true
+      }
+    ],
+    "validate": {
+      "method": "GET",
+      "path": "/api/v3/core/users/me/",
+      "expect": [
+        200
+      ]
+    }
+  },
+  "backend": {
+    "url": "{url}",
+    "health": "/-/health/live/",
+    "timeout": 20,
+    "tls_verify": "{verify_tls}",
+    "auth": {
+      "type": "bearer",
+      "secret": "token"
+    }
+  },
+  "access": {
+    "roles": [
+      "owner",
+      "admin"
+    ],
+    "groups": []
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/api/v3/core/users"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/core/users/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/core/groups"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/core/applications/*"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/providers/all"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/policies/bindings"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v3/events/events"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/core/users",
+      "owner_only": true,
+      "label": "create user"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v3/core/users/*",
+      "owner_only": true,
+      "label": "edit user"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v3/core/users/*",
+      "owner_only": true,
+      "label": "delete user"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/core/users/*/set_password",
+      "owner_only": true,
+      "label": "set password"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/core/users/*/recovery",
+      "owner_only": true,
+      "label": "recovery link"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/core/groups",
+      "owner_only": true,
+      "label": "create group"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v3/core/groups/*",
+      "owner_only": true,
+      "label": "edit group"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v3/core/groups/*",
+      "owner_only": true,
+      "label": "delete group"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/core/groups/*/add_user",
+      "owner_only": true,
+      "label": "add to group"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/core/groups/*/remove_user",
+      "owner_only": true,
+      "label": "remove from group"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v3/policies/bindings",
+      "owner_only": true,
+      "label": "grant app access"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v3/policies/bindings/*",
+      "owner_only": true,
+      "label": "revoke app access"
+    }
+  ],
+  "settings": [
+    {
+      "key": "events",
+      "type": "int",
+      "default": 60,
+      "min": 20,
+      "max": 200,
+      "label": "events to load",
+      "help": "how many of the latest Authentik events feed the logins tile, ticker and failed-login alert"
+    }
+  ]
+}
